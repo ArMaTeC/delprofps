@@ -130,6 +130,9 @@
 .PARAMETER Detailed
     Show detailed folder breakdown for each profile (Documents, Downloads, Desktop, etc.)
 
+.PARAMETER Preview
+    Preview/simulation mode - show what would be deleted without making any changes (alias for dry-run without -Delete)
+
 .EXAMPLE
     # List all profiles older than 30 days on local computer (dry run)
     .\DelprofPS.ps1
@@ -177,6 +180,10 @@
     .\DelprofPS.ps1 -ComputerName (Get-Content servers.txt) `
         -UseParallel -ThrottleLimit 10 `
         -DaysInactive 120 -Delete
+
+.EXAMPLE
+    # Show detailed folder breakdown for each profile
+    .\DelprofPS.ps1 -DaysInactive 60 -Detailed -ShowSpace
 
 .EXAMPLE
     # Process with all safety checks disabled (EXTREME CAUTION)
@@ -311,7 +318,10 @@ param (
     [string]$EmailFrom = "delprofps@$env:COMPUTERNAME",
 
     [Parameter()]
-    [switch]$Detailed
+    [switch]$Detailed,
+
+    [Parameter()]
+    [switch]$Preview
 )
 
 begin {
@@ -402,7 +412,9 @@ begin {
         if (-not $Quiet) {
             Write-Host "`n" + ('=' * 80) -ForegroundColor Cyan
             Write-Host " Delprof2-PS v$script:Version - User Profile Management Tool" -ForegroundColor Cyan
-            Write-Host " Mode: $(if ($Delete) { 'DELETE' } else { 'LIST/ANALYZE' })" -ForegroundColor $(if ($Delete) { 'Red' } else { 'Green' })
+            $modeText = if ($Preview) { 'PREVIEW/SIMULATION' } elseif ($Delete) { 'DELETE' } else { 'LIST/ANALYZE' }
+            $modeColor = if ($Preview) { 'Magenta' } elseif ($Delete) { 'Red' } else { 'Green' }
+            Write-Host " Mode: $modeText" -ForegroundColor $modeColor
             Write-Host " Criteria: Profiles older than $DaysInactive days" -ForegroundColor Cyan
             Write-Host ('=' * 80) + "`n" -ForegroundColor Cyan
         }
@@ -1501,7 +1513,23 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
                 Write-Host " Profiles deleted:    $script:TotalProfilesDeleted" -ForegroundColor $(if ($script:TotalProfilesDeleted -gt 0) { 'Green' } else { 'White' })
                 Write-Host " Space freed:         $(Format-Bytes -Bytes $script:TotalSpaceFreed)" -ForegroundColor $(if ($script:TotalSpaceFreed -gt 0) { 'Green' } else { 'White' })
             }
+            else {
+                # Dry run preview - show what WOULD be deleted
+                $wouldDelete = $script:Results | Where-Object { $_.EligibleForDeletion -and -not $_.IsActiveSession }
+                $wouldDeleteCount = $wouldDelete.Count
+                $wouldDeleteSize = ($wouldDelete | Measure-Object -Property SizeBytes -Sum).Sum
+                Write-Host " Would delete:        $wouldDeleteCount profiles ($(Format-Bytes -Bytes $wouldDeleteSize))" -ForegroundColor Yellow
+            }
             Write-Host " Duration:            $($duration.ToString('hh\:mm\:ss'))"
+            
+            # Top 5 largest profiles
+            if ($script:Results.Count -gt 0) {
+                Write-Host "`n TOP 5 LARGEST PROFILES:" -ForegroundColor Cyan
+                $top5 = $script:Results | Sort-Object SizeBytes -Descending | Select-Object -First 5
+                foreach ($prof in $top5) {
+                    Write-Host "  $($prof.UserName) on $($prof.ComputerName): $($prof.SizeFormatted) ($($prof.AgeInDays) days)" -ForegroundColor Gray
+                }
+            }
             
             # Age breakdown analysis
             if ($script:Results.Count -gt 0) {
@@ -1569,6 +1597,14 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
         exit 0
     }
     
+    # Preview mode banner
+    if ($Preview) {
+        Write-Host "`n╔════════════════════════════════════════════════════════════════════════╗" -ForegroundColor Magenta
+        Write-Host "║                        PREVIEW/SIMULATION MODE                         ║" -ForegroundColor Magenta
+        Write-Host "║          No profiles will be deleted - showing what WOULD happen       ║" -ForegroundColor Magenta
+        Write-Host "╚════════════════════════════════════════════════════════════════════════╝" -ForegroundColor Magenta
+    }
+    
     # Validate admin rights for local execution
     if ($ComputerName -contains $env:COMPUTERNAME -or $ComputerName -contains 'localhost' -or $ComputerName -contains '.') {
         if (-not (Test-AdminRights)) {
@@ -1611,6 +1647,39 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
 }
 
 process {
+    # Mass deletion safeguard - warn if processing many profiles
+    if ($Delete -and -not $Force -and -not $Quiet -and -not $Interactive) {
+        # First pass - count eligible profiles without deleting
+        $estimatedDeletions = 0
+        foreach ($computer in $ComputerName) {
+            Process-Computer -ComputerName $computer.Trim()
+            $eligibleOnComputer = $script:Results | Where-Object { 
+                $_.ComputerName -eq $computer.Trim() -and $_.EligibleForDeletion -and -not $_.IsActiveSession 
+            }
+            $estimatedDeletions += $eligibleOnComputer.Count
+        }
+        
+        # Mass deletion warning threshold
+        if ($estimatedDeletions -gt 50) {
+            Write-Host "`n  MASS DELETION WARNING " -ForegroundColor Red -BackgroundColor Black
+            Write-Host "This operation will delete $estimatedDeletions profiles!" -ForegroundColor Red
+            Write-Host "This is an unusually large number of deletions." -ForegroundColor Yellow
+            Write-Host "Are you sure you want to proceed?" -ForegroundColor Yellow
+            Write-Host "Type 'YES' to confirm: " -NoNewline -ForegroundColor Yellow
+            $confirm = Read-Host
+            if ($confirm -ne 'YES') {
+                Write-Host "Operation cancelled by user." -ForegroundColor Red
+                exit 1
+            }
+        }
+        
+        # Reset counters for actual deletion pass
+        $script:Results.Clear()
+        $script:TotalProfilesProcessed = 0
+        $script:TotalProfilesDeleted = 0
+        $script:TotalSpaceFreed = 0
+    }
+    
     # Interactive mode processing
     if ($Interactive) {
         foreach ($computer in $validComputers) {
@@ -1669,6 +1738,14 @@ process {
 
 end {
     Show-Summary
+    
+    # Preview mode completion message
+    if ($Preview) {
+        Write-Host "`n╔════════════════════════════════════════════════════════════════════════╗" -ForegroundColor Magenta
+        Write-Host "║                    PREVIEW MODE COMPLETE                               ║" -ForegroundColor Magenta
+        Write-Host "║        No profiles were deleted. Use -Delete to perform deletion.      ║" -ForegroundColor Magenta
+        Write-Host "╚════════════════════════════════════════════════════════════════════════╝" -ForegroundColor Magenta
+    }
     
     # Generate HTML report if requested
     if ($HtmlReport -and $script:Results.Count -gt 0) {
