@@ -1,0 +1,44 @@
+{
+    "_description": "Sample configuration file for Delprof2-PS",
+    "_notes": "Copy this file and modify values. Use with -ConfigFile parameter",
+    
+    "DaysInactive": 60,
+    "AgeCalculation": "NTUSER_DAT",
+    
+    "Exclude": [
+        "*admin*",
+        "*service*",
+        "Administrator*"
+    ],
+    
+    "Include": [],
+    
+    "ProfileType": "All",
+    "MaxRetries": 3,
+    "RetryDelaySeconds": 2,
+    
+    "MinProfileSizeMB": 0,
+    "MaxProfileSizeMB": 0,
+    
+    "UnloadHives": true,
+    "IncludeCorrupted": false,
+    "IncludeSystemProfiles": false,
+    "IncludeSpecialProfiles": false,
+    
+    "_comment_logging": "Log file path - leave empty to disable file logging",
+    "LogPath": "C:\\Logs\\DelprofPS.log",
+    
+    "_comment_output": "CSV export path - leave empty to disable CSV export",
+    "OutputPath": "C:\\Logs\\DelprofPS_Results.csv",
+    
+    "_comment_html": "HTML report path - leave empty to disable HTML report",
+    "HtmlReport": "C:\\Logs\\DelprofPS_Report.html",
+    
+    "_comment_backup": "Backup directory - profiles will be ZIPped before deletion",
+    "BackupPath": "C:\\Backups\\Profiles",
+    
+    "_comment_email": "Email notification settings for scheduled tasks",
+    "SmtpServer": "mail.company.com",
+    "EmailTo": "admin@company.com",
+    "EmailFrom": "delprofps@server01"
+}
