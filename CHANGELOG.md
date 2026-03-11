@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added - Major Enterprise Release
 
 #### Core Features
+
 - **Multi-computer support** - Process single or multiple computers via pipeline, arrays, or CSV import
 - **Age calculation methods** - NTUSER.DAT, ProfilePath, Registry timestamps, LastLogon, LastLogoff
 - **Active session detection** - Multi-method detection using quser, WMI, and explorer.exe process ownership
@@ -20,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Retry logic** - Configurable retry attempts with delays for locked files
 
 #### Enterprise Features
+
 - **Interactive mode (`-Interactive`)** - Visual menu system with keyboard navigation (arrow keys, space toggle, enter confirm)
 - **Test mode (`-Test`)** - Validate prerequisites and connectivity without making changes
 - **Preview mode (`-Preview`)** - Simulation mode with visual banners showing what WOULD be deleted
@@ -38,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Age breakdown analysis** - Profiles grouped by age ranges with totals
 
 #### Safety Features
+
 - Default dry-run mode (must use `-Delete` to actually remove profiles)
 - Active session protection (skips logged-in users unless `-IgnoreActiveSessions`)
 - System profile protection (excludes Default, Public, SYSTEM, etc.)
@@ -46,6 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Registry backup and safety checks
 
 ### Security
+
 - Protected SID list for system accounts
 - Admin privilege validation
 - Connection testing before operations
@@ -53,6 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.0.0] - Initial Release
 
 ### Added
+
 - Basic profile enumeration from registry
 - Simple age-based filtering
 - Profile deletion with registry cleanup
@@ -90,6 +95,7 @@ Delprof2-PS is a drop-in replacement with enhanced capabilities:
 | `/u` | `-UnloadHives` |
 
 ### New Capabilities Not in Delprof2
+
 - Interactive mode (`-Interactive`)
 - HTML reporting (`-HtmlReport`)
 - Email notifications (`-SmtpServer`, `-EmailTo`)
@@ -104,18 +110,21 @@ Delprof2-PS is a drop-in replacement with enhanced capabilities:
 ## Planned Features
 
 ### Version 2.1.0 (Planned)
+
 - [ ] Azure AD / Entra ID profile support
 - [ ] Cloud profile synchronization detection
 - [ ] Integration with Microsoft Endpoint Manager
 - [ ] Power BI report templates
 
 ### Version 2.2.0 (Planned)
+
 - [ ] GUI version (WinForms/WPF)
 - [ ] REST API endpoint
 - [ ] Web-based dashboard
 - [ ] Automated scheduling service
 
 ### Version 3.0.0 (Future)
+
 - [ ] Cross-platform support (PowerShell Core on Linux)
 - [ ] Container deployment options
 - [ ] Integration with monitoring systems (SCOM, Nagios)
