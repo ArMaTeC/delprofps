@@ -4,7 +4,7 @@
 
 [![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-blue.svg)](https://docs.microsoft.com/powershell/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-2.0.0-brightgreen.svg)]()
+[![Version](https://img.shields.io/badge/version-2.0.0-brightgreen.svg)](VERSION)
 
 ## Overview
 
@@ -13,6 +13,7 @@ Delprof2-PS is a feature-rich PowerShell script that exceeds the capabilities of
 ## Features
 
 ### Core Capabilities
+
 - **Local and Remote Computer Support** - Process profiles on multiple computers via pipeline or CSV input
 - **Multiple Age Calculation Methods** - NTUSER.DAT, ProfilePath, Registry, LastLogon, LastLogoff
 - **Active Session Detection** - Multi-method detection (quser, WMI, explorer.exe processes)
@@ -23,8 +24,9 @@ Delprof2-PS is a feature-rich PowerShell script that exceeds the capabilities of
 - **Retry Logic** - Configurable retries for locked files
 
 ### Enterprise Features
+
 | Feature | Description |
-|---------|-------------|
+| --------- | ------------- |
 | `-Interactive` | Visual menu for manual profile selection with keyboard navigation |
 | `-Test` | Validate prerequisites and connectivity without making changes |
 | `-Preview` | Simulation mode with visual banners showing what WOULD be deleted |
@@ -48,6 +50,7 @@ Delprof2-PS is a feature-rich PowerShell script that exceeds the capabilities of
 ## Installation
 
 1. Download the script:
+
 ```powershell
 # Clone the repository
 git clone https://github.com/yourusername/Delprof2-PS.git
@@ -56,7 +59,7 @@ git clone https://github.com/yourusername/Delprof2-PS.git
 Invoke-WebRequest -Uri "https://raw.githubusercontent.com/yourusername/Delprof2-PS/main/DelprofPS.ps1" -OutFile "DelprofPS.ps1"
 ```
 
-2. (Optional) Create a configuration file - see `DelprofPS.config.json` example
+1. (Optional) Create a configuration file - see `DelprofPS.config.json` example
 
 ## Quick Start
 
@@ -104,7 +107,7 @@ Invoke-WebRequest -Uri "https://raw.githubusercontent.com/yourusername/Delprof2-
 ## Parameters
 
 | Parameter | Description | Default |
-|-----------|-------------|---------|
+| ----------- | ------------- | --------- |
 | `ComputerName` | Target computer(s) | `$env:COMPUTERNAME` |
 | `DaysInactive` | Minimum days of inactivity | 30 |
 | `AgeCalculation` | Method: NTUSER_DAT, ProfilePath, Registry, LastLogon, LastLogoff | NTUSER_DAT |
@@ -173,7 +176,7 @@ Delprof2-PS includes multiple layers of protection:
 ## Event Log IDs
 
 | Event ID | Description |
-|----------|-------------|
+| ---------- | ------------- |
 | 1000 | Script started |
 | 1001 | HTML report generated |
 | 1002 | Script completed |
@@ -184,30 +187,35 @@ Delprof2-PS includes multiple layers of protection:
 ## Examples
 
 ### Example 1: Basic Dry Run
+
 ```powershell
 # See what profiles exist and their ages
 .\DelprofPS.ps1 -DaysInactive 30
 ```
 
 ### Example 2: Preview Mode
+
 ```powershell
 # See what WOULD be deleted without actually deleting
 .\DelprofPS.ps1 -DaysInactive 60 -Preview -ShowSpace
 ```
 
 ### Example 3: Interactive Selection
+
 ```powershell
 # Use arrow keys to navigate, Space to toggle, Enter to confirm
 .\DelprofPS.ps1 -DaysInactive 90 -Interactive
 ```
 
 ### Example 4: Delete with Backup
+
 ```powershell
 # Backup profiles before deletion
 .\DelprofPS.ps1 -Delete -DaysInactive 60 -BackupPath "D:\Backups"
 ```
 
 ### Example 5: Remote Computers
+
 ```powershell
 # Process multiple computers
 $computers = @("SERVER01", "SERVER02", "SERVER03")
@@ -215,18 +223,21 @@ $computers = @("SERVER01", "SERVER02", "SERVER03")
 ```
 
 ### Example 6: Detailed Analysis
+
 ```powershell
 # Show folder breakdowns and export to HTML
 .\DelprofPS.ps1 -Detailed -ShowSpace -HtmlReport "C:\Reports\profiles.html"
 ```
 
 ### Example 7: Test Connectivity
+
 ```powershell
 # Validate access to computers without processing
 .\DelprofPS.ps1 -ComputerName (Get-Content servers.txt) -Test
 ```
 
 ### Example 8: Email Notification
+
 ```powershell
 # Send email report after completion
 .\DelprofPS.ps1 -Delete -DaysInactive 60 `
@@ -236,12 +247,14 @@ $computers = @("SERVER01", "SERVER02", "SERVER03")
 ```
 
 ### Example 9: Use Configuration File
+
 ```powershell
 # Load settings from JSON file
 .\DelprofPS.ps1 -ConfigFile "C:\Config\delprof.json" -Delete
 ```
 
 ### Example 10: Parallel Processing
+
 ```powershell
 # Process many computers in parallel
 .\DelprofPS.ps1 -ComputerName (Get-Content 100-servers.txt) `
@@ -252,7 +265,9 @@ $computers = @("SERVER01", "SERVER02", "SERVER03")
 ## Output
 
 ### Console Output
+
 The script provides color-coded console output:
+
 - **Green** - Profiles < 30 days old
 - **Yellow** - Profiles 30-90 days old  
 - **Magenta** - Profiles 90-180 days old
@@ -260,7 +275,8 @@ The script provides color-coded console output:
 - **Yellow background** - Active sessions (protected)
 
 ### Summary Report
-```
+
+```text
 ================================================================================
  SUMMARY
 ================================================================================
@@ -285,7 +301,9 @@ The script provides color-coded console output:
 ```
 
 ### HTML Report
+
 Professional HTML reports include:
+
 - Summary dashboard with statistics
 - Detailed profile table with color-coded rows
 - Profile type badges (Local, Roaming, Temporary, Mandatory)
@@ -296,22 +314,26 @@ Professional HTML reports include:
 
 ### Common Issues
 
-**"Access Denied" errors**
+#### "Access Denied" errors
+
 - Ensure running with administrative privileges
 - Verify WinRM/PSRemoting is enabled on remote computers
 - Check firewall rules for remote management
 
-**"Cannot enumerate profiles"**
+#### "Cannot enumerate profiles"
+
 - Verify registry access permissions
 - Check if target computer is online
 - Test with `-Test` parameter first
 
-**Large deletions fail**
+#### Large deletions fail
+
 - Use `-Force` to bypass confirmation (not recommended for production)
 - Increase `-ThrottleLimit` for parallel processing
 - Check available disk space for backups
 
 ### Debug Mode
+
 ```powershell
 # Enable verbose output
 .\DelprofPS.ps1 -Verbose -LogPath "C:\Logs\debug.log"

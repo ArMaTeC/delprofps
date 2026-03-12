@@ -68,7 +68,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Event Log Reference
 
 | Event ID | Level | Description |
-|----------|-------|-------------|
+| ---------- | ------- | ------------- |
 | 1000 | Information | Script started |
 | 1001 | Information | HTML report generated |
 | 1002 | Information | Script completed |
@@ -85,7 +85,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Delprof2-PS is a drop-in replacement with enhanced capabilities:
 
 | Delprof2 | Delprof2-PS Equivalent |
-|----------|----------------------|
+| ---------- | ---------------------- |
 | `/c` | `-ComputerName` |
 | `/d` | `-DaysInactive` |
 | `/q` | `-Quiet` |

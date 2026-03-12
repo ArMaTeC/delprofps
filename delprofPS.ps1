@@ -1187,7 +1187,7 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
     #endregion
 
     #region Profile Deletion Functions
-    function Unload-RegistryHive {
+    function Dismount-RegistryHive {
         param([string]$ProfilePath)
         
         try {
