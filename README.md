@@ -1,16 +1,29 @@
 # Delprof2-PS
 
-> A comprehensive, enterprise-grade PowerShell replacement for Helge Klein's Delprof2 with advanced features and safety mechanisms.
-
 [![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-blue.svg)](https://docs.microsoft.com/powershell/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Version](https://img.shields.io/badge/version-2.0.0-brightgreen.svg)](VERSION)
 
-## Overview
+> **A comprehensive, enterprise-grade PowerShell replacement for Helge Klein's Delprof2 with advanced features, safety mechanisms, and modern capabilities.**
 
-Delprof2-PS is a feature-rich PowerShell script that exceeds the capabilities of the original [Delprof2](https://helgeklein.com/delprof2/) tool. It provides enterprise-grade user profile management with comprehensive safety features, detailed reporting, and modern PowerShell capabilities.
+---
 
-## Features
+## 📋 Overview
+
+Delprof2-PS is a feature-rich PowerShell script that **exceeds** the capabilities of the original [Delprof2](https://helgeklein.com/delprof2/) tool. It provides enterprise-grade user profile management with comprehensive safety features, detailed reporting, and modern PowerShell capabilities.
+
+### ✨ Why Choose Delprof2-PS?
+
+- 🚀 **Modern PowerShell** - Built for PowerShell 5.1+ with full cmdlet support
+- 🛡️ **Safety First** - Multiple layers of protection prevent accidental deletions
+- 📊 **Rich Reporting** - HTML reports, CSV export, and Windows Event Log integration
+- 🔧 **Corruption Repair** - Interactive mode to fix corrupted profiles safely
+- 🖥️ **Visual Interface** - Interactive selection with color-coded output
+- ⚡ **Parallel Processing** - Process hundreds of computers efficiently
+
+---
+
+## 🎯 Features
 
 ### Core Capabilities
 
@@ -40,6 +53,7 @@ Delprof2-PS is a feature-rich PowerShell script that exceeds the capabilities of
 | Age Color Coding | Color-coded output based on profile age |
 | `-Detailed` | Per-folder size breakdown (Documents, Downloads, etc.) |
 | Mass Deletion Safeguard | Warns on >50 profile deletions (requires "YES" confirmation) |
+| `-FixCorruption` | Interactive corruption repair with admin approval |
 
 ## Requirements
 
@@ -128,6 +142,7 @@ Invoke-WebRequest -Uri "https://raw.githubusercontent.com/yourusername/Delprof2-
 | `MinProfileSizeMB` | Minimum profile size | None |
 | `MaxProfileSizeMB` | Maximum profile size | None |
 | `IncludeCorrupted` | Include corrupted profiles | False |
+| `FixCorruption` | Enable interactive corruption repair | False |
 | `ProfileType` | Filter: Local, Roaming, Temporary, Mandatory, All | All |
 | `Interactive` | Interactive selection mode | False |
 | `Test` | Test connectivity only | False |
@@ -170,8 +185,9 @@ Delprof2-PS includes multiple layers of protection:
 4. **Registry Hive Unloading** - `-UnloadHives` safely unloads hives before deletion
 5. **Backup Capability** - `-BackupPath` creates ZIP backups before deletion
 6. **Mass Deletion Warning** - Warns on >50 profiles, requires "YES" confirmation
-7. **Comprehensive Logging** - File and Windows Event Log integration
-8. **ShouldProcess Support** - `-WhatIf` and `-Confirm` standard PowerShell parameters
+7. **Corruption Repair Safety** - `-FixCorruption` requires interactive admin approval for each fix
+8. **Comprehensive Logging** - File and Windows Event Log integration
+9. **ShouldProcess Support** - `-WhatIf` and `-Confirm` standard PowerShell parameters
 
 ## Event Log IDs
 
@@ -261,6 +277,19 @@ $computers = @("SERVER01", "SERVER02", "SERVER03")
     -UseParallel -ThrottleLimit 20 `
     -Delete -DaysInactive 120
 ```
+
+### Example 11: Corruption Repair Mode
+
+```powershell
+# Interactively fix corrupted profiles with full administrator control
+# Options: Remove orphaned registry keys, Delete profile, Recreate NTUSER.DAT, Skip
+.\DelprofPS.ps1 -FixCorruption -Interactive -IncludeCorrupted
+
+# List corrupted profiles without making changes
+.\DelprofPS.ps1 -IncludeCorrupted -Preview
+```
+
+---
 
 ## Output
 

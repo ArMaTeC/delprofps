@@ -51,6 +51,25 @@ $script:StartTime = Get-Date
 #endregion
 
 #region Helper Functions
+<#
+.SYNOPSIS
+    Writes a formatted log message to the console with timestamp and color coding.
+
+.DESCRIPTION
+    Outputs test log messages with visual indicators (checkmarks, X marks, etc.)
+    and color-coded severity levels for easy reading during test execution.
+
+.PARAMETER Message
+    The text message to display.
+
+.PARAMETER Level
+    The severity level: INFO (white), PASS (green), FAIL (red), WARN (yellow), SECTION (cyan).
+
+.EXAMPLE
+    Write-TestLog "Starting test execution" 'SECTION'
+    Write-TestLog "Test passed successfully" 'PASS'
+    Write-TestLog "Warning: Low disk space" 'WARN'
+#>
 function Write-TestLog {
     param(
         [string]$Message,
@@ -78,6 +97,27 @@ function Write-TestLog {
     Write-Host "$prefix [$timestamp] $Message" -ForegroundColor $colorMap[$Level]
 }
 
+<#
+.SYNOPSIS
+    Records a test result for the final summary report.
+
+.DESCRIPTION
+    Adds a test result to the collection that will be displayed
+    in the test summary at the end of execution.
+
+.PARAMETER TestName
+    Name of the test case.
+
+.PARAMETER Passed
+    Boolean indicating if the test passed ($true) or failed ($false).
+
+.PARAMETER ErrorMessage
+    Optional error message if the test failed.
+
+.EXAMPLE
+    Add-TestResult -TestName "Profile Enumeration" -Passed $true
+    Add-TestResult -TestName "CSV Export" -Passed $false -ErrorMessage "File not found"
+#>
 function Add-TestResult {
     param(
         [string]$TestName,
@@ -95,6 +135,22 @@ function Add-TestResult {
     })
 }
 
+<#
+.SYNOPSIS
+    Checks if the current PowerShell session has administrative privileges.
+
+.DESCRIPTION
+    Verifies that the script is running with elevated privileges,
+    which are required for creating test users and managing profiles.
+
+.OUTPUTS
+    [bool] Returns $true if running as administrator, $false otherwise.
+
+.EXAMPLE
+    if (-not (Test-AdminRights)) {
+        Write-Error "This script requires administrator privileges."
+    }
+#>
 function Test-AdminRights {
     $currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
     return $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -102,6 +158,28 @@ function Test-AdminRights {
 #endregion
 
 #region Test Setup Functions
+<#
+.SYNOPSIS
+    Creates a local test user account with a simulated aged profile.
+
+.DESCRIPTION
+    Creates a local user account, generates a profile directory with
+    simulated data files, and sets the NTUSER.DAT timestamp to simulate
+    a profile of a specific age for testing purposes.
+
+.PARAMETER UserName
+    The username for the test account.
+
+.PARAMETER DaysOld
+    Number of days to age the profile (affects NTUSER.DAT timestamp).
+
+.PARAMETER SizeMB
+    Target size in MB for generated test data in the profile.
+
+.EXAMPLE
+    New-TestUser -UserName "DPTest_User1" -DaysOld 60 -SizeMB 100
+    Creates a test user with a 60-day-old profile containing ~100MB of data.
+#>
 function New-TestUser {
     param(
         [string]$UserName,
@@ -178,6 +256,19 @@ function New-TestUser {
     }
 }
 
+<#
+.SYNOPSIS
+    Initializes the test environment by creating the test directory and all test users.
+
+.DESCRIPTION
+    Prepares the test environment by creating the test path directory and
+    generating all configured test user accounts with their simulated profiles.
+    Validates administrator privileges before proceeding.
+
+.EXAMPLE
+    Initialize-TestEnvironment
+    Creates all test users defined in $script:TestUsers configuration.
+#>
 function Initialize-TestEnvironment {
     Write-TestLog "Initializing test environment..." 'SECTION'
 
@@ -209,6 +300,18 @@ function Initialize-TestEnvironment {
 #endregion
 
 #region Test Cases
+<#
+.SYNOPSIS
+    Tests the profile enumeration functionality of DelprofPS.
+
+.DESCRIPTION
+    Validates that DelprofPS can correctly discover and enumerate user profiles
+    on the local system, returning proper profile data with paths and SIDs.
+
+.EXAMPLE
+    Test-ProfileEnumeration
+    Runs the profile enumeration test and records the result.
+#>
 function Test-ProfileEnumeration {
     Write-TestLog "`nTEST: Profile Enumeration" 'SECTION'
 
@@ -580,6 +683,21 @@ function Test-ProfileDeletion {
 #endregion
 
 #region Cleanup Functions
+<#
+.SYNOPSIS
+    Removes a test user account and associated profile data.
+
+.DESCRIPTION
+    Cleans up a test user by removing the local user account,
+    profile directory, and associated registry entries.
+
+.PARAMETER UserName
+    The username of the test account to remove.
+
+.EXAMPLE
+    Remove-TestUser -UserName "DPTest_User1"
+    Removes the specified test user and cleans up all associated data.
+#>
 function Remove-TestUser {
     param([string]$UserName)
 
@@ -622,6 +740,22 @@ function Remove-TestUser {
     }
 }
 
+<#
+.SYNOPSIS
+    Cleans up the entire test environment by removing all test artifacts.
+
+.DESCRIPTION
+    Removes all test users, their profiles, and generated test files.
+    Respects the -KeepTestArtifacts switch to preserve artifacts for inspection.
+
+.EXAMPLE
+    Clear-TestEnvironment
+    Removes all test users and cleans up the test directory.
+
+.EXAMPLE
+    Clear-TestEnvironment -KeepTestArtifacts
+    Skips cleanup when KeepTestArtifacts is specified.
+#>
 function Clear-TestEnvironment {
     Write-TestLog "`nCleaning up test environment..." 'SECTION'
 
@@ -658,6 +792,19 @@ function Clear-TestEnvironment {
 #endregion
 
 #region Main Execution
+<#
+.SYNOPSIS
+    Displays a formatted summary of all test results.
+
+.DESCRIPTION
+    Calculates and displays the total number of tests run, passed, and failed,
+    along with execution duration. Lists any failed tests with their error messages.
+    Exits with code 0 if all tests passed, or 1 if any tests failed.
+
+.EXAMPLE
+    Show-TestSummary
+    Displays the test summary report and exits with appropriate return code.
+#>
 function Show-TestSummary {
     Write-TestLog "`n" + ('=' * 80) 'SECTION'
     Write-TestLog "TEST SUMMARY" 'SECTION'
@@ -693,7 +840,32 @@ function Show-TestSummary {
     }
 }
 
-# Main execution
+<#
+.SYNOPSIS
+    Main entry point for the Delprof2-PS test suite.
+
+.DESCRIPTION
+    Orchestrates the entire test execution flow:
+    1. Displays test header information
+    2. Initializes the test environment
+    3. Runs all test cases
+    4. Cleans up test artifacts
+    5. Displays test summary
+
+    Handles errors gracefully and ensures cleanup runs even if tests fail.
+
+.EXAMPLE
+    Main
+    Executes the complete test suite.
+
+.EXAMPLE
+    # Run from command line
+    .\DelprofPS.Tests.ps1
+
+.EXAMPLE
+    # Run and keep artifacts for inspection
+    .\DelprofPS.Tests.ps1 -KeepTestArtifacts
+#>
 function Main {
     Clear-Host
     Write-TestLog "Delprof2-PS Comprehensive Test Suite" 'SECTION'

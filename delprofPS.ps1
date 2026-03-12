@@ -94,6 +94,13 @@
 .PARAMETER IncludeCorrupted
     Include corrupted profiles in processing.
 
+.PARAMETER FixCorruption
+    Enable interactive corruption repair mode. Presents options to fix corrupted profiles:
+    - Remove orphaned registry keys (for missing profile paths)
+    - Delete corrupted profiles entirely
+    - Recreate NTUSER.DAT from default template
+    - Skip and continue. Requires -Interactive for full control.
+
 .PARAMETER ProfileType
     Filter by profile type: Local, Roaming, Temporary, Mandatory, or All (default).
 
@@ -282,6 +289,9 @@ param (
 
     [Parameter()]
     [switch]$IncludeCorrupted,
+
+    [Parameter()]
+    [switch]$FixCorruption,
 
     [Parameter()]
     [ValidateSet('Local', 'Roaming', 'Temporary', 'Mandatory', 'All')]
@@ -1070,6 +1080,243 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
         
         return 'Local'
     }
+
+    function Repair-CorruptedProfile {
+        [CmdletBinding(SupportsShouldProcess = $true)]
+        param(
+            [string]$ComputerName,
+            [string]$SID,
+            [string]$UserName,
+            [string]$ProfilePath,
+            [string]$CorruptionType
+        )
+        
+        $fixed = $false
+        $actionTaken = 'No action taken'
+        
+        Write-DPLog -Message "Corruption detected for $UserName ($SID)`: $CorruptionType" -Level 'WARNING'
+        
+        if (-not $Quiet) {
+            Write-Host "`n  CORRUPTION DETECTED" -ForegroundColor Red -BackgroundColor Black
+            Write-Host "  User: $UserName" -ForegroundColor Yellow
+            Write-Host "  SID: $SID" -ForegroundColor Yellow
+            Write-Host "  Path: $ProfilePath" -ForegroundColor Yellow
+            Write-Host "  Issue: $CorruptionType" -ForegroundColor Red
+        }
+        
+        # Determine available repair options based on corruption type
+        $repairOptions = @()
+        
+        switch ($CorruptionType) {
+            'Corrupted (Path Missing)' {
+                $repairOptions = @(
+                    @{ Key = 'R'; Label = 'Remove orphaned registry key'; Description = 'Deletes the stale registry entry pointing to non-existent folder'; Risk = 'Low' }
+                    @{ Key = 'S'; Label = 'Skip'; Description = 'Leave as-is and continue'; Risk = 'None' }
+                )
+            }
+            'Corrupted (No NTUSER.DAT)' {
+                $repairOptions = @(
+                    @{ Key = 'D'; Label = 'Delete entire profile'; Description = 'Remove registry key and delete profile folder'; Risk = 'Medium' }
+                    @{ Key = 'R'; Label = 'Recreate NTUSER.DAT'; Description = 'Copy default NTUSER.DAT to fix the profile'; Risk = 'Low' }
+                    @{ Key = 'F'; Label = 'Force-remove folder only'; Description = 'Delete folder contents but keep registry key'; Risk = 'Medium' }
+                    @{ Key = 'S'; Label = 'Skip'; Description = 'Leave as-is and continue'; Risk = 'None' }
+                )
+            }
+        }
+        
+        # Display interactive menu
+        if (-not $Quiet) {
+            Write-Host "`n  Available repair options:" -ForegroundColor Cyan
+            foreach ($opt in $repairOptions) {
+                $riskColor = switch ($opt.Risk) {
+                    'Low' { 'Green' }
+                    'Medium' { 'Yellow' }
+                    'High' { 'Red' }
+                    default { 'White' }
+                }
+                Write-Host "    [$($opt.Key)] $($opt.Label)" -ForegroundColor White -NoNewline
+                Write-Host " [Risk: $($opt.Risk)]" -ForegroundColor $riskColor
+                Write-Host "        $($opt.Description)" -ForegroundColor Gray
+            }
+            Write-Host "`n  NOTE: This operation requires administrative privileges." -ForegroundColor Magenta
+            Write-Host "  The user will NOT be able to log in until repaired." -ForegroundColor Magenta
+        }
+        
+        # Get user choice (respecting Force parameter for non-interactive)
+        $choice = $null
+        if ($Force -and -not $Interactive) {
+            # In Force mode without Interactive, default to Skip to prevent accidental damage
+            $choice = 'S'
+            if (-not $Quiet) {
+                Write-Host "`n  Force mode active - defaulting to Skip. Use -FixCorruption with -Interactive for manual control." -ForegroundColor Yellow
+            }
+        }
+        else {
+            # Interactive prompt
+            $validChoices = $repairOptions.Key
+            while ($choice -notin $validChoices) {
+                if (-not $Quiet) {
+                    Write-Host "`n  Enter your choice [$(($validChoices -join '/'))]: " -ForegroundColor Cyan -NoNewline
+                }
+                $choice = Read-Host
+                $choice = $choice.ToUpper().Trim()
+            }
+        }
+        
+        # Execute chosen action
+        switch ($choice) {
+            'R' {  # Remove registry key or Recreate NTUSER.DAT
+                if ($CorruptionType -eq 'Corrupted (Path Missing)') {
+                    # Remove orphaned registry key
+                    $targetDesc = "Remove orphaned registry key for $UserName ($SID)"
+                    if ($PSCmdlet.ShouldProcess($targetDesc, 'Remove Registry Key')) {
+                        try {
+                            $regKey = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$SID"
+                            if ($ComputerName -eq $env:COMPUTERNAME -or $ComputerName -eq 'localhost' -or $ComputerName -eq '.') {
+                                if (Test-Path $regKey) {
+                                    Remove-Item -Path $regKey -Recurse -Force
+                                }
+                            }
+                            else {
+                                $scriptBlock = {
+                                    param($sid)
+                                    $regPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList"
+                                    if (Test-Path "$regPath\$sid") {
+                                        Remove-Item -Path "$regPath\$sid" -Recurse -Force
+                                    }
+                                }
+                                Invoke-Command -ComputerName $ComputerName -ScriptBlock $scriptBlock -ArgumentList $SID
+                            }
+                            $fixed = $true
+                            $actionTaken = 'Removed orphaned registry key'
+                            Write-DPLog -Message "Removed orphaned registry key for $UserName" -Level 'SUCCESS'
+                        }
+                        catch {
+                            $actionTaken = "Failed to remove registry key: $($_.Exception.Message)"
+                            Write-DPLog -Message "Failed to remove registry key for $UserName`: $($_.Exception.Message)" -Level 'ERROR'
+                        }
+                    }
+                }
+                else {
+                    # Recreate NTUSER.DAT
+                    $targetDesc = "Recreate NTUSER.DAT for $UserName at $ProfilePath"
+                    if ($PSCmdlet.ShouldProcess($targetDesc, 'Recreate NTUSER.DAT')) {
+                        try {
+                            $defaultNtUser = "C:\Users\Default\NTUSER.DAT"
+                            if (Test-Path $defaultNtUser) {
+                                $targetNtUser = Join-Path $ProfilePath 'NTUSER.DAT'
+                                Copy-Item -Path $defaultNtUser -Destination $targetNtUser -Force
+                                
+                                # Set proper permissions (simplified - full ACL would require more code)
+                                $acl = Get-Acl $targetNtUser
+                                $sidObject = New-Object System.Security.Principal.SecurityIdentifier($SID)
+                                $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($sidObject, 'FullControl', 'Allow')
+                                $acl.SetAccessRule($rule)
+                                Set-Acl $targetNtUser $acl
+                                
+                                $fixed = $true
+                                $actionTaken = 'Recreated NTUSER.DAT from default'
+                                Write-DPLog -Message "Recreated NTUSER.DAT for $UserName" -Level 'SUCCESS'
+                            }
+                            else {
+                                $actionTaken = 'Default NTUSER.DAT not found'
+                                Write-DPLog -Message "Default NTUSER.DAT not found for copying" -Level 'ERROR'
+                            }
+                        }
+                        catch {
+                            $actionTaken = "Failed to recreate NTUSER.DAT: $($_.Exception.Message)"
+                            Write-DPLog -Message "Failed to recreate NTUSER.DAT for $UserName`: $($_.Exception.Message)" -Level 'ERROR'
+                        }
+                    }
+                }
+            }
+            
+            'D' {  # Delete entire profile
+                $targetDesc = "Delete entire corrupted profile for $UserName ($SID) at $ProfilePath"
+                if ($PSCmdlet.ShouldProcess($targetDesc, 'Delete Corrupted Profile')) {
+                    try {
+                        # Remove registry key
+                        $regKey = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$SID"
+                        if ($ComputerName -eq $env:COMPUTERNAME -or $ComputerName -eq 'localhost' -or $ComputerName -eq '.') {
+                            if (Test-Path $regKey) {
+                                Remove-Item -Path $regKey -Recurse -Force
+                            }
+                            if (Test-Path $ProfilePath) {
+                                Remove-Item -Path $ProfilePath -Recurse -Force
+                            }
+                        }
+                        else {
+                            $scriptBlock = {
+                                param($sid, $profilePath)
+                                $regPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList"
+                                if (Test-Path "$regPath\$sid") {
+                                    Remove-Item -Path "$regPath\$sid" -Recurse -Force
+                                }
+                                if (Test-Path $profilePath) {
+                                    Remove-Item -Path $profilePath -Recurse -Force
+                                }
+                            }
+                            Invoke-Command -ComputerName $ComputerName -ScriptBlock $scriptBlock -ArgumentList $SID, $ProfilePath
+                        }
+                        $fixed = $true
+                        $actionTaken = 'Deleted entire corrupted profile'
+                        Write-DPLog -Message "Deleted corrupted profile for $UserName" -Level 'SUCCESS'
+                    }
+                    catch {
+                        $actionTaken = "Failed to delete profile: $($_.Exception.Message)"
+                        Write-DPLog -Message "Failed to delete corrupted profile for $UserName`: $($_.Exception.Message)" -Level 'ERROR'
+                    }
+                }
+            }
+            
+            'F' {  # Force-remove folder only
+                $targetDesc = "Remove profile folder for $UserName at $ProfilePath"
+                if ($PSCmdlet.ShouldProcess($targetDesc, 'Remove Folder')) {
+                    try {
+                        if ($ComputerName -eq $env:COMPUTERNAME -or $ComputerName -eq 'localhost' -or $ComputerName -eq '.') {
+                            if (Test-Path $ProfilePath) {
+                                # Remove read-only attributes
+                                Get-ChildItem -Path $ProfilePath -Recurse -Force -ErrorAction SilentlyContinue | 
+                                    ForEach-Object { $_.Attributes = $_.Attributes -band -bnot [System.IO.FileAttributes]::ReadOnly }
+                                Remove-Item -Path $ProfilePath -Recurse -Force
+                            }
+                        }
+                        else {
+                            $scriptBlock = {
+                                param($profilePath)
+                                if (Test-Path $profilePath) {
+                                    Get-ChildItem -Path $profilePath -Recurse -Force -ErrorAction SilentlyContinue | 
+                                        ForEach-Object { $_.Attributes = $_.Attributes -band -bnot [System.IO.FileAttributes]::ReadOnly }
+                                    Remove-Item -Path $profilePath -Recurse -Force
+                                }
+                            }
+                            Invoke-Command -ComputerName $ComputerName -ScriptBlock $scriptBlock -ArgumentList $ProfilePath
+                        }
+                        $fixed = $true
+                        $actionTaken = 'Removed profile folder only'
+                        Write-DPLog -Message "Removed profile folder for $UserName (registry key preserved)" -Level 'SUCCESS'
+                    }
+                    catch {
+                        $actionTaken = "Failed to remove folder: $($_.Exception.Message)"
+                        Write-DPLog -Message "Failed to remove folder for $UserName`: $($_.Exception.Message)" -Level 'ERROR'
+                    }
+                }
+            }
+            
+            'S' {  # Skip
+                $actionTaken = 'Skipped by administrator'
+                if (-not $Quiet) {
+                    Write-Host "  Skipped corruption repair for $UserName" -ForegroundColor Yellow
+                }
+            }
+        }
+        
+        return [PSCustomObject]@{
+            Fixed = $fixed
+            ActionTaken = $actionTaken
+            Choice = $choice
+        }
+    }
     #endregion
 
     #region Core Profile Functions
@@ -1084,8 +1331,6 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
             $profileListPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList"
             
             if ($ComputerName -ne $env:COMPUTERNAME -and $ComputerName -ne 'localhost' -and $ComputerName -ne '.') {
-                # Remote registry access
-                $regPath = "\\$ComputerName\HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList"
                 # Use WMI for remote registry
                 $profileKeys = Get-WmiObject -ComputerName $ComputerName -Class StdRegProv -Namespace 'root\default' -ErrorAction Stop |
                     ForEach-Object { $_.EnumKey(2147483650, 'SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList') } |
@@ -1231,7 +1476,7 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
             try {
                 # Unload registry hive if requested
                 if ($UnloadHives) {
-                    Unload-RegistryHive -ProfilePath $ProfilePath
+                    Dismount-RegistryHive -ProfilePath $ProfilePath
                 }
                 
                 # Remove read-only attributes
@@ -1327,7 +1572,8 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
     #endregion
 
     #region Main Processing Functions
-    function Process-Computer {
+    function Invoke-ComputerProcessing {
+        [CmdletBinding(SupportsShouldProcess = $true)]
         param([string]$ComputerName)
         
         Write-DPLog -Message "Processing computer: $ComputerName" -Level 'INFO'
@@ -1382,10 +1628,45 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
             # Get profile type
             $profType = Get-ProfileType -ProfileInfo $profileInfo
             
-            # Skip corrupted unless requested
-            if ($profType -like 'Corrupted*' -and -not $IncludeCorrupted) {
+            # Skip corrupted unless requested or FixCorruption is enabled
+            if ($profType -like 'Corrupted*' -and -not $IncludeCorrupted -and -not $FixCorruption) {
                 Write-DPLog -Message "Skipping corrupted profile: $userName" -Level 'VERBOSE'
                 continue
+            }
+            
+            # Handle corruption repair if requested
+            if ($profType -like 'Corrupted*' -and $FixCorruption) {
+                $repairResult = Repair-CorruptedProfile -ComputerName $ComputerName -SID $sid -UserName $userName -ProfilePath $profilePath -CorruptionType $profType
+                
+                # Add repair result to the profile info for reporting
+                if (-not $script:RepairResults) {
+                    $script:RepairResults = [System.Collections.Generic.List[object]]::new()
+                }
+                $script:RepairResults.Add([PSCustomObject]@{
+                    ComputerName = $ComputerName
+                    UserName = $userName
+                    SID = $sid
+                    CorruptionType = $profType
+                    Fixed = $repairResult.Fixed
+                    ActionTaken = $repairResult.ActionTaken
+                })
+                
+                # If corruption was fixed by recreating NTUSER.DAT, continue processing normally
+                if ($repairResult.Fixed -and $repairResult.Choice -eq 'R') {
+                    # Re-check profile type - it should now be valid
+                    $profType = Get-ProfileType -ProfileInfo $profileInfo
+                    Write-DPLog -Message "Profile $userName repaired successfully - continuing with normal processing" -Level 'SUCCESS'
+                }
+                # If profile was deleted as part of repair, skip further processing
+                elseif ($repairResult.Choice -in @('D', 'F')) {
+                    Write-DPLog -Message "Profile $userName handled via corruption repair - skipping deletion phase" -Level 'INFO'
+                    continue
+                }
+                # If skipped or failed, move to next profile
+                elseif ($repairResult.Choice -eq 'S' -or -not $repairResult.Fixed) {
+                    Write-DPLog -Message "Corruption repair skipped or failed for $userName - continuing to next profile" -Level 'WARNING'
+                    continue
+                }
             }
             
             # Get profile age
@@ -1652,7 +1933,7 @@ process {
         # First pass - count eligible profiles without deleting
         $estimatedDeletions = 0
         foreach ($computer in $ComputerName) {
-            Process-Computer -ComputerName $computer.Trim()
+            Invoke-ComputerProcessing -ComputerName $computer.Trim()
             $eligibleOnComputer = $script:Results | Where-Object { 
                 $_.ComputerName -eq $computer.Trim() -and $_.EligibleForDeletion -and -not $_.IsActiveSession 
             }
@@ -1683,7 +1964,7 @@ process {
     # Interactive mode processing
     if ($Interactive) {
         foreach ($computer in $validComputers) {
-            Process-Computer -ComputerName $computer
+            Invoke-ComputerProcessing -ComputerName $computer
         }
         
         # After collecting all eligible profiles, let user select interactively
@@ -1721,7 +2002,7 @@ process {
             # Note: In parallel mode, we need to handle logging carefully
             $comp = $_
             # Simplified parallel processing - log to file only
-            Process-Computer -ComputerName $comp.Trim()
+            Invoke-ComputerProcessing -ComputerName $comp.Trim()
         } -ThrottleLimit $ThrottleLimit
     }
     else {
@@ -1730,7 +2011,7 @@ process {
         for ($i = 0; $i -lt $computerCount; $i++) {
             $percentComplete = [math]::Floor(($i / $computerCount) * 100)
             Write-Progress -Activity "Processing Computers" -Status "Processing $($ComputerName[$i]) ($($i+1) of $computerCount)" -PercentComplete $percentComplete
-            Process-Computer -ComputerName $ComputerName[$i].Trim()
+            Invoke-ComputerProcessing -ComputerName $ComputerName[$i].Trim()
         }
         Write-Progress -Activity "Processing Computers" -Completed
     }
