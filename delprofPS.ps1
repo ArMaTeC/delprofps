@@ -356,271 +356,271 @@ begin {
         
         # XAML UI Definition
         [xml]$xaml = @"
-    <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-            xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-            Title="Delprof2-PS Profile Manager" Height="750" Width="1000"
-            WindowStartupLocation="CenterScreen" Background="#F5F5F5">
-        <Window.Resources>
-            <Style TargetType="Button">
-                <Setter Property="Padding" Value="15,8"/>
-                <Setter Property="Margin" Value="5"/>
-                <Setter Property="Background" Value="#007ACC"/>
-                <Setter Property="Foreground" Value="White"/>
-                <Setter Property="BorderThickness" Value="0"/>
-                <Setter Property="FontWeight" Value="SemiBold"/>
-            </Style>
-            <Style TargetType="GroupBox">
-                <Setter Property="Margin" Value="5"/>
-                <Setter Property="Padding" Value="10"/>
-                <Setter Property="Background" Value="White"/>
-                <Setter Property="BorderBrush" Value="#CCCCCC"/>
-            </Style>
-        </Window.Resources>
-        <Grid>
-            <Grid.RowDefinitions>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="*"/>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="200"/>
-                <RowDefinition Height="Auto"/>
-            </Grid.RowDefinitions>
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Delprof2-PS Profile Manager" Height="750" Width="1000"
+        WindowStartupLocation="CenterScreen" Background="#F5F5F5">
+    <Window.Resources>
+        <Style TargetType="Button">
+            <Setter Property="Padding" Value="15,8"/>
+            <Setter Property="Margin" Value="5"/>
+            <Setter Property="Background" Value="#007ACC"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+        </Style>
+        <Style TargetType="GroupBox">
+            <Setter Property="Margin" Value="5"/>
+            <Setter Property="Padding" Value="10"/>
+            <Setter Property="Background" Value="White"/>
+            <Setter Property="BorderBrush" Value="#CCCCCC"/>
+        </Style>
+    </Window.Resources>
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="200"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        
+        <!-- Header -->
+        <Border Grid.Row="0" Background="#007ACC" Padding="15">
+            <StackPanel>
+                <TextBlock Text="Delprof2-PS Profile Manager" Foreground="White" FontSize="24" FontWeight="Bold"/>
+                <TextBlock Text="Enterprise User Profile Management" Foreground="#E0E0E0" FontSize="12"/>
+            </StackPanel>
+        </Border>
+        
+        <!-- Main Content -->
+        <TabControl Grid.Row="1" Margin="10">
+            <!-- Connection Tab -->
+            <TabItem Header="Connection">
+                <Grid Margin="10">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+                    <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
+                        <RadioButton x:Name="rbLocalComputer" Content="Local Computer" IsChecked="True" Margin="0,0,20,0"/>
+                        <RadioButton x:Name="rbRemoteComputers" Content="Remote Computers"/>
+                    </StackPanel>
+                    <TextBlock Grid.Row="1" Text="Computer Names (one per line or comma-separated):" Margin="0,0,0,5"/>
+                    <TextBox Grid.Row="2" x:Name="txtComputerList" AcceptsReturn="True" VerticalScrollBarVisibility="Auto"
+                             TextWrapping="Wrap" FontFamily="Consolas" FontSize="12"/>
+                </Grid>
+            </TabItem>
             
-            <!-- Header -->
-            <Border Grid.Row="0" Background="#007ACC" Padding="15">
-                <StackPanel>
-                    <TextBlock Text="Delprof2-PS Profile Manager" Foreground="White" FontSize="24" FontWeight="Bold"/>
-                    <TextBlock Text="Enterprise User Profile Management" Foreground="#E0E0E0" FontSize="12"/>
-                </StackPanel>
-            </Border>
-            
-            <!-- Main Content -->
-            <TabControl Grid.Row="1" Margin="10">
-                <!-- Connection Tab -->
-                <TabItem Header="Connection">
-                    <Grid Margin="10">
-                        <Grid.RowDefinitions>
-                            <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="*"/>
-                        </Grid.RowDefinitions>
-                        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
-                            <RadioButton x:Name="rbLocalComputer" Content="Local Computer" IsChecked="True" Margin="0,0,20,0"/>
-                            <RadioButton x:Name="rbRemoteComputers" Content="Remote Computers"/>
-                        </StackPanel>
-                        <TextBlock Grid.Row="1" Text="Computer Names (one per line or comma-separated):" Margin="0,0,0,5"/>
-                        <TextBox Grid.Row="2" x:Name="txtComputerList" AcceptsReturn="True" VerticalScrollBarVisibility="Auto"
-                                 TextWrapping="Wrap" FontFamily="Consolas" FontSize="12"/>
-                    </Grid>
-                </TabItem>
-                
-                <!-- Filters Tab -->
-                <TabItem Header="Filters">
-                    <ScrollViewer VerticalScrollBarVisibility="Auto">
-                        <StackPanel Margin="10">
-                            <GroupBox Header="Age Settings">
-                                <Grid Margin="5">
-                                    <Grid.RowDefinitions>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                    </Grid.RowDefinitions>
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="Auto"/>
-                                        <ColumnDefinition Width="*"/>
-                                        <ColumnDefinition Width="Auto"/>
-                                    </Grid.ColumnDefinitions>
-                                    <TextBlock Grid.Row="0" Grid.Column="0" Text="Days Inactive:" VerticalAlignment="Center" Margin="0,0,10,0"/>
-                                    <Slider Grid.Row="0" Grid.Column="1" x:Name="sldDaysInactive" Minimum="0" Maximum="365" Value="30" TickFrequency="1"/>
-                                    <TextBlock Grid.Row="0" Grid.Column="2" x:Name="txtDaysValue" Text="30 days" Width="60" Margin="10,0,0,0"/>
-                                    
-                                    <TextBlock Grid.Row="1" Grid.Column="0" Text="Age Method:" VerticalAlignment="Center" Margin="0,10,10,0"/>
-                                    <ComboBox Grid.Row="1" Grid.Column="1" x:Name="cmbAgeMethod" SelectedIndex="0">
-                                        <ComboBoxItem Content="NTUSER.DAT modified"/>
-                                        <ComboBoxItem Content="Profile Path modified"/>
-                                        <ComboBoxItem Content="Registry value"/>
-                                        <ComboBoxItem Content="Last Logon"/>
-                                        <ComboBoxItem Content="Last Logoff"/>
-                                    </ComboBox>
-                                    
-                                    <TextBlock Grid.Row="2" Grid.Column="0" Text="Profile Type:" VerticalAlignment="Center" Margin="0,10,10,0"/>
-                                    <ComboBox Grid.Row="2" Grid.Column="1" x:Name="cmbProfileType" SelectedIndex="0">
-                                        <ComboBoxItem Content="All Profiles"/>
-                                        <ComboBoxItem Content="Local Only"/>
-                                        <ComboBoxItem Content="Roaming Only"/>
-                                        <ComboBoxItem Content="Temporary Only"/>
-                                        <ComboBoxItem Content="Mandatory Only"/>
-                                    </ComboBox>
-                                </Grid>
-                            </GroupBox>
-                            
-                            <GroupBox Header="Include/Exclude Patterns">
-                                <Grid Margin="5">
-                                    <Grid.RowDefinitions>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                    </Grid.RowDefinitions>
-                                    <TextBlock Grid.Row="0" Text="Include Pattern (e.g., user*, admin*):" Margin="0,0,0,5"/>
-                                    <TextBox Grid.Row="1" x:Name="txtInclude" Margin="0,0,0,10"/>
-                                    <TextBlock Grid.Row="2" Text="Exclude Pattern (e.g., Administrator*, *service*):" Margin="0,0,0,5"/>
-                                    <TextBox Grid.Row="3" x:Name="txtExclude" Text="Administrator*, *admin*, *service*"/>
-                                </Grid>
-                            </GroupBox>
-                            
-                            <GroupBox Header="Size Filters (MB)">
-                                <StackPanel Orientation="Horizontal" Margin="5">
-                                    <TextBlock Text="Min Size:" VerticalAlignment="Center" Margin="0,0,5,0"/>
-                                    <TextBox x:Name="txtMinSize" Width="80" Margin="0,0,20,0"/>
-                                    <TextBlock Text="Max Size:" VerticalAlignment="Center" Margin="0,0,5,0"/>
-                                    <TextBox x:Name="txtMaxSize" Width="80"/>
-                                </StackPanel>
-                            </GroupBox>
-                        </StackPanel>
-                    </ScrollViewer>
-                </TabItem>
-                
-                <!-- Actions Tab -->
-                <TabItem Header="Actions">
-                    <ScrollViewer VerticalScrollBarVisibility="Auto">
-                        <StackPanel Margin="10">
-                            <GroupBox Header="Operation Mode">
-                                <StackPanel Margin="5">
-                                    <RadioButton x:Name="rbModePreview" Content="Preview Only (no changes)" IsChecked="True" Margin="0,2"/>
-                                    <RadioButton x:Name="rbModeDelete" Content="Delete Profiles" Margin="0,2"/>
-                                </StackPanel>
-                            </GroupBox>
-                            
-                            <GroupBox Header="Options">
-                                <UniformGrid Columns="2" Margin="5">
-                                    <CheckBox x:Name="chkIncludeCorrupted" Content="Include Corrupted" Margin="5"/>
-                                    <CheckBox x:Name="chkFixCorruption" Content="Fix Corruption (Interactive)" Margin="5"/>
-                                    <CheckBox x:Name="chkShowSpace" Content="Show Disk Space" IsChecked="True" Margin="5"/>
-                                    <CheckBox x:Name="chkDetailed" Content="Detailed Folder Breakdown" Margin="5"/>
-                                    <CheckBox x:Name="chkUnloadHives" Content="Unload Registry Hives" IsChecked="True" Margin="5"/>
-                                    <CheckBox x:Name="chkIgnoreActive" Content="Ignore Active Sessions (DANGER)" Margin="5"/>
-                                    <CheckBox x:Name="chkIncludeSystem" Content="Include System Profiles" Margin="5"/>
-                                    <CheckBox x:Name="chkIncludeSpecial" Content="Include Special Profiles" Margin="5"/>
-                                    <CheckBox x:Name="chkForce" Content="Force (Skip Confirmations)" Margin="5"/>
-                                    <CheckBox x:Name="chkInteractive" Content="Interactive Mode" Margin="5"/>
-                                    <CheckBox x:Name="chkQuiet" Content="Quiet Mode" Margin="5"/>
-                                    <CheckBox x:Name="chkTestMode" Content="Test Mode (Validate Only)" Margin="5"/>
-                                </UniformGrid>
-                            </GroupBox>
-                            
-                            <GroupBox Header="Parallel Processing">
-                                <Grid Margin="5">
-                                    <Grid.RowDefinitions>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                    </Grid.RowDefinitions>
-                                    <CheckBox Grid.Row="0" x:Name="chkUseParallel" Content="Enable Parallel Processing" Margin="0,0,0,10"/>
-                                    <StackPanel Grid.Row="1" Orientation="Horizontal">
-                                        <TextBlock Text="Throttle Limit:" VerticalAlignment="Center" Margin="0,0,10,0"/>
-                                        <Slider x:Name="sldThrottle" Minimum="1" Maximum="20" Value="5" Width="200" TickFrequency="1"/>
-                                        <TextBlock x:Name="txtThrottleValue" Text="5" Width="30" Margin="10,0,0,0"/>
-                                    </StackPanel>
-                                </Grid>
-                            </GroupBox>
-                        </StackPanel>
-                    </ScrollViewer>
-                </TabItem>
-                
-                <!-- Output Tab -->
-                <TabItem Header="Output &amp; Reporting">
-                    <ScrollViewer VerticalScrollBarVisibility="Auto">
-                        <StackPanel Margin="10">
-                            <GroupBox Header="Backup Settings">
-                                <Grid Margin="5">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="Auto"/>
-                                        <ColumnDefinition Width="*"/>
-                                        <ColumnDefinition Width="Auto"/>
-                                    </Grid.ColumnDefinitions>
-                                    <CheckBox Grid.Column="0" x:Name="chkBackup" Content="Enable Backup" Margin="0,0,10,0"/>
-                                    <TextBox Grid.Column="1" x:Name="txtBackupPath" IsEnabled="{Binding ElementName=chkBackup, Path=IsChecked}"/>
-                                    <Button Grid.Column="2" x:Name="btnBrowseBackup" Content="Browse..." Width="80" Margin="10,0,0,0"/>
-                                </Grid>
-                            </GroupBox>
-                            
-                            <GroupBox Header="Log &amp; Export Paths">
-                                <Grid Margin="5">
-                                    <Grid.RowDefinitions>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                    </Grid.RowDefinitions>
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="Auto"/>
-                                        <ColumnDefinition Width="*"/>
-                                        <ColumnDefinition Width="Auto"/>
-                                    </Grid.ColumnDefinitions>
-                                    
-                                    <CheckBox Grid.Row="0" Grid.Column="0" x:Name="chkLogPath" Content="Log File:" Margin="0,5"/>
-                                    <TextBox Grid.Row="0" Grid.Column="1" x:Name="txtLogPath" IsEnabled="{Binding ElementName=chkLogPath, Path=IsChecked}"/>
-                                    <Button Grid.Row="0" Grid.Column="2" x:Name="btnBrowseLog" Content="Browse..." Width="80" Margin="10,0,0,0"/>
-                                    
-                                    <CheckBox Grid.Row="1" Grid.Column="0" x:Name="chkOutputCSV" Content="CSV Output:" Margin="0,5"/>
-                                    <TextBox Grid.Row="1" Grid.Column="1" x:Name="txtOutputPath" IsEnabled="{Binding ElementName=chkOutputCSV, Path=IsChecked}"/>
-                                    <Button Grid.Row="1" Grid.Column="2" x:Name="btnBrowseCSV" Content="Browse..." Width="80" Margin="10,0,0,0"/>
-                                    
-                                    <CheckBox Grid.Row="2" Grid.Column="0" x:Name="chkHtmlReport" Content="HTML Report:" Margin="0,5"/>
-                                    <TextBox Grid.Row="2" Grid.Column="1" x:Name="txtHtmlPath" IsEnabled="{Binding ElementName=chkHtmlReport, Path=IsChecked}"/>
-                                    <Button Grid.Row="2" Grid.Column="2" x:Name="btnBrowseHtml" Content="Browse..." Width="80" Margin="10,0,0,0"/>
-                                </Grid>
-                            </GroupBox>
-                            
-                            <GroupBox Header="Email Notifications">
-                                <Grid Margin="5">
-                                    <Grid.RowDefinitions>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                    </Grid.RowDefinitions>
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="Auto"/>
-                                        <ColumnDefinition Width="*"/>
-                                    </Grid.ColumnDefinitions>
-                                    <TextBlock Grid.Row="0" Grid.Column="0" Text="SMTP Server:" Width="100" VerticalAlignment="Center"/>
-                                    <TextBox Grid.Row="0" Grid.Column="1" x:Name="txtSmtpServer"/>
-                                    <TextBlock Grid.Row="1" Grid.Column="0" Text="To:" Width="100" VerticalAlignment="Center" Margin="0,5,0,0"/>
-                                    <TextBox Grid.Row="1" Grid.Column="1" x:Name="txtEmailTo" Margin="0,5,0,0"/>
-                                    <TextBlock Grid.Row="2" Grid.Column="0" Text="From:" Width="100" VerticalAlignment="Center" Margin="0,5,0,0"/>
-                                    <TextBox Grid.Row="2" Grid.Column="1" x:Name="txtEmailFrom" Text="delprofps@localhost" Margin="0,5,0,0"/>
-                                </Grid>
-                            </GroupBox>
-                        </StackPanel>
-                    </ScrollViewer>
-                </TabItem>
-            </TabControl>
-            
-            <!-- Action Buttons -->
-            <Border Grid.Row="2" Background="#E8E8E8" Padding="10">
-                <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
-                    <Button x:Name="btnLoadConfig" Content="Load Config" Background="#6C757D"/>
-                    <Button x:Name="btnSaveConfig" Content="Save Config" Background="#6C757D"/>
-                    <Button x:Name="btnClear" Content="Clear Output" Background="#FFC107" Foreground="Black"/>
-                    <Button x:Name="btnStop" Content="Stop" Background="#DC3545" IsEnabled="False"/>
-                    <Button x:Name="btnRun" Content="RUN" Width="120" FontSize="14" Background="#28A745"/>
-                </StackPanel>
-            </Border>
-            
-            <!-- Output Console -->
-            <Border Grid.Row="3" Background="#1E1E1E" Margin="10,0">
-                <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto">
-                    <TextBox x:Name="txtOutput" Background="Transparent" Foreground="#D4D4D4"
-                             FontFamily="Consolas" FontSize="11" IsReadOnly="True"
-                             TextWrapping="Wrap" BorderThickness="0" Padding="5"/>
+            <!-- Filters Tab -->
+            <TabItem Header="Filters">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <StackPanel Margin="10">
+                        <GroupBox Header="Age Settings">
+                            <Grid Margin="5">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                </Grid.RowDefinitions>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Row="0" Grid.Column="0" Text="Days Inactive:" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                                <Slider Grid.Row="0" Grid.Column="1" x:Name="sldDaysInactive" Minimum="0" Maximum="365" Value="30" TickFrequency="1"/>
+                                <TextBlock Grid.Row="0" Grid.Column="2" x:Name="txtDaysValue" Text="30 days" Width="60" Margin="10,0,0,0"/>
+                                
+                                <TextBlock Grid.Row="1" Grid.Column="0" Text="Age Method:" VerticalAlignment="Center" Margin="0,10,10,0"/>
+                                <ComboBox Grid.Row="1" Grid.Column="1" x:Name="cmbAgeMethod" SelectedIndex="0">
+                                    <ComboBoxItem Content="NTUSER.DAT modified"/>
+                                    <ComboBoxItem Content="Profile Path modified"/>
+                                    <ComboBoxItem Content="Registry value"/>
+                                    <ComboBoxItem Content="Last Logon"/>
+                                    <ComboBoxItem Content="Last Logoff"/>
+                                </ComboBox>
+                                
+                                <TextBlock Grid.Row="2" Grid.Column="0" Text="Profile Type:" VerticalAlignment="Center" Margin="0,10,10,0"/>
+                                <ComboBox Grid.Row="2" Grid.Column="1" x:Name="cmbProfileType" SelectedIndex="0">
+                                    <ComboBoxItem Content="All Profiles"/>
+                                    <ComboBoxItem Content="Local Only"/>
+                                    <ComboBoxItem Content="Roaming Only"/>
+                                    <ComboBoxItem Content="Temporary Only"/>
+                                    <ComboBoxItem Content="Mandatory Only"/>
+                                </ComboBox>
+                            </Grid>
+                        </GroupBox>
+                        
+                        <GroupBox Header="Include/Exclude Patterns">
+                            <Grid Margin="5">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                </Grid.RowDefinitions>
+                                <TextBlock Grid.Row="0" Text="Include Pattern (e.g., user*, admin*):" Margin="0,0,0,5"/>
+                                <TextBox Grid.Row="1" x:Name="txtInclude" Margin="0,0,0,10"/>
+                                <TextBlock Grid.Row="2" Text="Exclude Pattern (e.g., Administrator*, *service*):" Margin="0,0,0,5"/>
+                                <TextBox Grid.Row="3" x:Name="txtExclude" Text="Administrator*, *admin*, *service*"/>
+                            </Grid>
+                        </GroupBox>
+                        
+                        <GroupBox Header="Size Filters (MB)">
+                            <StackPanel Orientation="Horizontal" Margin="5">
+                                <TextBlock Text="Min Size:" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                                <TextBox x:Name="txtMinSize" Width="80" Margin="0,0,20,0"/>
+                                <TextBlock Text="Max Size:" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                                <TextBox x:Name="txtMaxSize" Width="80"/>
+                            </StackPanel>
+                        </GroupBox>
+                    </StackPanel>
                 </ScrollViewer>
-            </Border>
+            </TabItem>
             
-            <!-- Progress Bar -->
-            <ProgressBar Grid.Row="4" x:Name="progressBar" Height="20" Margin="10"
-                         IsIndeterminate="False" Visibility="Collapsed"/>
-        </Grid>
-    </Window>
-    "@
+            <!-- Actions Tab -->
+            <TabItem Header="Actions">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <StackPanel Margin="10">
+                        <GroupBox Header="Operation Mode">
+                            <StackPanel Margin="5">
+                                <RadioButton x:Name="rbModePreview" Content="Preview Only (no changes)" IsChecked="True" Margin="0,2"/>
+                                <RadioButton x:Name="rbModeDelete" Content="Delete Profiles" Margin="0,2"/>
+                            </StackPanel>
+                        </GroupBox>
+                        
+                        <GroupBox Header="Options">
+                            <UniformGrid Columns="2" Margin="5">
+                                <CheckBox x:Name="chkIncludeCorrupted" Content="Include Corrupted" Margin="5"/>
+                                <CheckBox x:Name="chkFixCorruption" Content="Fix Corruption (Interactive)" Margin="5"/>
+                                <CheckBox x:Name="chkShowSpace" Content="Show Disk Space" IsChecked="True" Margin="5"/>
+                                <CheckBox x:Name="chkDetailed" Content="Detailed Folder Breakdown" Margin="5"/>
+                                <CheckBox x:Name="chkUnloadHives" Content="Unload Registry Hives" IsChecked="True" Margin="5"/>
+                                <CheckBox x:Name="chkIgnoreActive" Content="Ignore Active Sessions (DANGER)" Margin="5"/>
+                                <CheckBox x:Name="chkIncludeSystem" Content="Include System Profiles" Margin="5"/>
+                                <CheckBox x:Name="chkIncludeSpecial" Content="Include Special Profiles" Margin="5"/>
+                                <CheckBox x:Name="chkForce" Content="Force (Skip Confirmations)" Margin="5"/>
+                                <CheckBox x:Name="chkInteractive" Content="Interactive Mode" Margin="5"/>
+                                <CheckBox x:Name="chkQuiet" Content="Quiet Mode" Margin="5"/>
+                                <CheckBox x:Name="chkTestMode" Content="Test Mode (Validate Only)" Margin="5"/>
+                            </UniformGrid>
+                        </GroupBox>
+                        
+                        <GroupBox Header="Parallel Processing">
+                            <Grid Margin="5">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                </Grid.RowDefinitions>
+                                <CheckBox Grid.Row="0" x:Name="chkUseParallel" Content="Enable Parallel Processing" Margin="0,0,0,10"/>
+                                <StackPanel Grid.Row="1" Orientation="Horizontal">
+                                    <TextBlock Text="Throttle Limit:" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                                    <Slider x:Name="sldThrottle" Minimum="1" Maximum="20" Value="5" Width="200" TickFrequency="1"/>
+                                    <TextBlock x:Name="txtThrottleValue" Text="5" Width="30" Margin="10,0,0,0"/>
+                                </StackPanel>
+                            </Grid>
+                        </GroupBox>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+            
+            <!-- Output Tab -->
+            <TabItem Header="Output &amp; Reporting">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <StackPanel Margin="10">
+                        <GroupBox Header="Backup Settings">
+                            <Grid Margin="5">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <CheckBox Grid.Column="0" x:Name="chkBackup" Content="Enable Backup" Margin="0,0,10,0"/>
+                                <TextBox Grid.Column="1" x:Name="txtBackupPath" IsEnabled="{Binding ElementName=chkBackup, Path=IsChecked}"/>
+                                <Button Grid.Column="2" x:Name="btnBrowseBackup" Content="Browse..." Width="80" Margin="10,0,0,0"/>
+                            </Grid>
+                        </GroupBox>
+                        
+                        <GroupBox Header="Log &amp; Export Paths">
+                            <Grid Margin="5">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                </Grid.RowDefinitions>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                
+                                <CheckBox Grid.Row="0" Grid.Column="0" x:Name="chkLogPath" Content="Log File:" Margin="0,5"/>
+                                <TextBox Grid.Row="0" Grid.Column="1" x:Name="txtLogPath" IsEnabled="{Binding ElementName=chkLogPath, Path=IsChecked}"/>
+                                <Button Grid.Row="0" Grid.Column="2" x:Name="btnBrowseLog" Content="Browse..." Width="80" Margin="10,0,0,0"/>
+                                
+                                <CheckBox Grid.Row="1" Grid.Column="0" x:Name="chkOutputCSV" Content="CSV Output:" Margin="0,5"/>
+                                <TextBox Grid.Row="1" Grid.Column="1" x:Name="txtOutputPath" IsEnabled="{Binding ElementName=chkOutputCSV, Path=IsChecked}"/>
+                                <Button Grid.Row="1" Grid.Column="2" x:Name="btnBrowseCSV" Content="Browse..." Width="80" Margin="10,0,0,0"/>
+                                
+                                <CheckBox Grid.Row="2" Grid.Column="0" x:Name="chkHtmlReport" Content="HTML Report:" Margin="0,5"/>
+                                <TextBox Grid.Row="2" Grid.Column="1" x:Name="txtHtmlPath" IsEnabled="{Binding ElementName=chkHtmlReport, Path=IsChecked}"/>
+                                <Button Grid.Row="2" Grid.Column="2" x:Name="btnBrowseHtml" Content="Browse..." Width="80" Margin="10,0,0,0"/>
+                            </Grid>
+                        </GroupBox>
+                        
+                        <GroupBox Header="Email Notifications">
+                            <Grid Margin="5">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                </Grid.RowDefinitions>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Row="0" Grid.Column="0" Text="SMTP Server:" Width="100" VerticalAlignment="Center"/>
+                                <TextBox Grid.Row="0" Grid.Column="1" x:Name="txtSmtpServer"/>
+                                <TextBlock Grid.Row="1" Grid.Column="0" Text="To:" Width="100" VerticalAlignment="Center" Margin="0,5,0,0"/>
+                                <TextBox Grid.Row="1" Grid.Column="1" x:Name="txtEmailTo" Margin="0,5,0,0"/>
+                                <TextBlock Grid.Row="2" Grid.Column="0" Text="From:" Width="100" VerticalAlignment="Center" Margin="0,5,0,0"/>
+                                <TextBox Grid.Row="2" Grid.Column="1" x:Name="txtEmailFrom" Text="delprofps@localhost" Margin="0,5,0,0"/>
+                            </Grid>
+                        </GroupBox>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+        </TabControl>
+        
+        <!-- Action Buttons -->
+        <Border Grid.Row="2" Background="#E8E8E8" Padding="10">
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                <Button x:Name="btnLoadConfig" Content="Load Config" Background="#6C757D"/>
+                <Button x:Name="btnSaveConfig" Content="Save Config" Background="#6C757D"/>
+                <Button x:Name="btnClear" Content="Clear Output" Background="#FFC107" Foreground="Black"/>
+                <Button x:Name="btnStop" Content="Stop" Background="#DC3545" IsEnabled="False"/>
+                <Button x:Name="btnRun" Content="RUN" Width="120" FontSize="14" Background="#28A745"/>
+            </StackPanel>
+        </Border>
+        
+        <!-- Output Console -->
+        <Border Grid.Row="3" Background="#1E1E1E" Margin="10,0">
+            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto">
+                <TextBox x:Name="txtOutput" Background="Transparent" Foreground="#D4D4D4"
+                         FontFamily="Consolas" FontSize="11" IsReadOnly="True"
+                         TextWrapping="Wrap" BorderThickness="0" Padding="5"/>
+            </ScrollViewer>
+        </Border>
+        
+        <!-- Progress Bar -->
+        <ProgressBar Grid.Row="4" x:Name="progressBar" Height="20" Margin="10"
+                     IsIndeterminate="False" Visibility="Collapsed"/>
+    </Grid>
+</Window>
+"@
         
         # Load XAML
         $reader = New-Object System.Xml.XmlNodeReader $xaml
@@ -913,6 +913,7 @@ begin {
         $window.ShowDialog() | Out-Null
     }
     #endregion
+
 
     #region UI Mode Check
     if ($UI) {
