@@ -49,11 +49,14 @@
 .PARAMETER Force
     Skip confirmation prompts and ignore non-critical errors.
 
-.PARAMETER WhatIf
-    Show what would be deleted without actually deleting.
+.PARAMETER UI
+    Launches the graphical user interface for visual profile management.
+    Provides a modern WPF-based GUI with access to all script functionality.
 
-.PARAMETER Confirm
-    Prompt for confirmation before each deletion.
+.PARAMETER Preview
+    Shows what would be deleted without actually deleting. Performs a dry run
+    that displays all profiles that match the criteria and would be removed.
+    Combine with -Delete to see preview before actual deletion.
 
 .PARAMETER IgnoreActiveSessions
     Allow deletion of profiles with active user sessions (DANGEROUS).
@@ -136,9 +139,6 @@
 
 .PARAMETER Detailed
     Show detailed folder breakdown for each profile (Documents, Downloads, Desktop, etc.)
-
-.PARAMETER Preview
-    Preview/simulation mode - show what would be deleted without making any changes (alias for dry-run without -Delete)
 
 .EXAMPLE
     # List all profiles older than 30 days on local computer (dry run)
@@ -252,6 +252,12 @@ param (
     [switch]$Force,
 
     [Parameter()]
+    [switch]$UI,
+
+    [Parameter()]
+    [switch]$Preview,
+
+    [Parameter()]
     [switch]$IgnoreActiveSessions,
 
     [Parameter()]
@@ -328,13 +334,17 @@ param (
     [string]$EmailFrom = "delprofps@$env:COMPUTERNAME",
 
     [Parameter()]
-    [switch]$Detailed,
-
-    [Parameter()]
-    [switch]$Preview
+    [switch]$Detailed
 )
 
 begin {
+    #region UI Mode Check
+    if ($UI) {
+        Show-DelprofPSGUI
+        return
+    }
+    #endregion
+
     #region Initialization
     $script:StartTime = Get-Date
     $script:Version = '2.0.0'
