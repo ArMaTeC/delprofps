@@ -729,10 +729,88 @@ begin {
         $controls['txtLogPath'].Text = $defaultLogPath
         $controls['chkLogPath'].IsChecked = $true
         
+        # Reusable config loader — applies a parsed JSON config object to the GUI controls
+        $script:ApplyConfig = {
+            param([psobject]$config, [string]$source)
+            try {
+                # Connection
+                if ($null -ne $config.RemoteComputers) { $controls['rbRemoteComputers'].IsChecked = [bool]$config.RemoteComputers; $controls['rbLocalComputer'].IsChecked = -not [bool]$config.RemoteComputers }
+                if ($config.ComputerList) { $controls['txtComputerList'].Text = $config.ComputerList }
+                
+                # Age / Type filters
+                if ($null -ne $config.DaysInactive) { $controls['sldDaysInactive'].Value = $config.DaysInactive }
+                if ($null -ne $config.AgeMethod) { $controls['cmbAgeMethod'].SelectedIndex = [int]$config.AgeMethod }
+                if ($null -ne $config.ProfileType) { $controls['cmbProfileType'].SelectedIndex = [int]$config.ProfileType }
+                
+                # Pattern filters
+                if ($config.Exclude) { $controls['txtExclude'].Text = ($config.Exclude -join ', ') }
+                if ($config.Include) { $controls['txtInclude'].Text = ($config.Include -join ', ') }
+                
+                # Size filters
+                if ($config.MinSize) { $controls['txtMinSize'].Text = $config.MinSize }
+                if ($config.MaxSize) { $controls['txtMaxSize'].Text = $config.MaxSize }
+                
+                # Operation mode
+                if ($null -ne $config.DeleteMode) { $controls['rbModeDelete'].IsChecked = [bool]$config.DeleteMode; $controls['rbModePreview'].IsChecked = -not [bool]$config.DeleteMode }
+                
+                # Checkboxes (Actions tab)
+                if ($null -ne $config.IncludeCorrupted) { $controls['chkIncludeCorrupted'].IsChecked = [bool]$config.IncludeCorrupted }
+                if ($null -ne $config.FixCorruption) { $controls['chkFixCorruption'].IsChecked = [bool]$config.FixCorruption }
+                if ($null -ne $config.ShowSpace) { $controls['chkShowSpace'].IsChecked = [bool]$config.ShowSpace }
+                if ($null -ne $config.Detailed) { $controls['chkDetailed'].IsChecked = [bool]$config.Detailed }
+                if ($null -ne $config.UnloadHives) { $controls['chkUnloadHives'].IsChecked = [bool]$config.UnloadHives }
+                if ($null -ne $config.IgnoreActive) { $controls['chkIgnoreActive'].IsChecked = [bool]$config.IgnoreActive }
+                if ($null -ne $config.IncludeSystem) { $controls['chkIncludeSystem'].IsChecked = [bool]$config.IncludeSystem }
+                if ($null -ne $config.IncludeSpecial) { $controls['chkIncludeSpecial'].IsChecked = [bool]$config.IncludeSpecial }
+                if ($null -ne $config.Force) { $controls['chkForce'].IsChecked = [bool]$config.Force }
+                if ($null -ne $config.Interactive) { $controls['chkInteractive'].IsChecked = [bool]$config.Interactive }
+                if ($null -ne $config.Quiet) { $controls['chkQuiet'].IsChecked = [bool]$config.Quiet }
+                if ($null -ne $config.TestMode) { $controls['chkTestMode'].IsChecked = [bool]$config.TestMode }
+                
+                # Parallel
+                if ($null -ne $config.UseParallel) { $controls['chkUseParallel'].IsChecked = [bool]$config.UseParallel }
+                if ($null -ne $config.ThrottleLimit) { $controls['sldThrottle'].Value = $config.ThrottleLimit }
+                
+                # Output paths
+                if ($config.LogPath) { $controls['txtLogPath'].Text = $config.LogPath; $controls['chkLogPath'].IsChecked = $true }
+                if ($config.OutputPath) { $controls['txtOutputPath'].Text = $config.OutputPath; $controls['chkOutputCSV'].IsChecked = $true }
+                if ($config.HtmlReport) { $controls['txtHtmlPath'].Text = $config.HtmlReport; $controls['chkHtmlReport'].IsChecked = $true }
+                if ($config.BackupPath) { $controls['txtBackupPath'].Text = $config.BackupPath; $controls['chkBackup'].IsChecked = $true }
+                
+                # Email
+                if ($config.SmtpServer) { $controls['txtSmtpServer'].Text = $config.SmtpServer }
+                if ($config.EmailTo) { $controls['txtEmailTo'].Text = $config.EmailTo }
+                if ($config.EmailFrom) { $controls['txtEmailFrom'].Text = $config.EmailFrom }
+                
+                & $script:WriteGuiOutput -Text "[Config] Loaded from $source" -Color 'Green'
+                & $script:WriteGuiOutput -Text "[Config] Applied: DaysInactive=$($controls['sldDaysInactive'].Value), Exclude=$($controls['txtExclude'].Text), Include=$($controls['txtInclude'].Text)" -Color 'Gray'
+            }
+            catch {
+                & $script:WriteGuiOutput -Text "[Config] ERROR applying config: $($_.Exception.Message)" -Color 'Red'
+            }
+        }
+        
         & $script:WriteGuiOutput -Text '=== Delprof2-PS GUI Initialized ===' -Color 'Cyan'
         & $script:WriteGuiOutput -Text "PowerShell Version: $($PSVersionTable.PSVersion)" -Color 'Gray'
         & $script:WriteGuiOutput -Text "Running as: $([Security.Principal.WindowsIdentity]::GetCurrent().Name)" -Color 'Gray'
         & $script:WriteGuiOutput -Text "Computer: $env:COMPUTERNAME" -Color 'Gray'
+        
+        # Auto-load config if exactly one .config.json file exists next to the script
+        $configFiles = @(Get-ChildItem -Path $PSScriptRoot -Filter '*.config.json' -File -ErrorAction SilentlyContinue)
+        if ($configFiles.Count -eq 1) {
+            & $script:WriteGuiOutput -Text "[Config] Found config file: $($configFiles[0].Name) — auto-loading..." -Color 'Cyan'
+            try {
+                $autoConfig = Get-Content $configFiles[0].FullName -Raw | ConvertFrom-Json
+                & $script:ApplyConfig -config $autoConfig -source $configFiles[0].Name
+            }
+            catch {
+                & $script:WriteGuiOutput -Text "[Config] ERROR: Failed to auto-load config: $($_.Exception.Message)" -Color 'Red'
+            }
+        }
+        elseif ($configFiles.Count -gt 1) {
+            & $script:WriteGuiOutput -Text "[Config] Multiple config files found ($($configFiles.Count)) — use Load Config to choose one" -Color 'Yellow'
+        }
+        
         & $script:WriteGuiOutput -Text 'Ready. Use the tabs above to configure, then click RUN or Refresh Profiles.' -Color 'Green'
         
         # Event Handler: Throttle Slider
@@ -1294,31 +1372,9 @@ begin {
             $open.Filter = "JSON files (*.json)|*.json|All files (*.*)|*.*"
             $open.Title = "Load DelprofPS Configuration"
             if ($open.ShowDialog() -eq "OK") {
-                & $script:WriteGuiOutput -Text "[Config] Loading configuration from: $($open.FileName)" -Color 'Gray'
                 try {
-                    $config = Get-Content $open.FileName | ConvertFrom-Json
-                    & $script:WriteGuiOutput -Text "[Config] JSON parsed successfully - applying settings..." -Color 'Gray'
-                    if ($config.DaysInactive) { $controls['sldDaysInactive'].Value = $config.DaysInactive }
-                    if ($config.Exclude) { $controls['txtExclude'].Text = ($config.Exclude -join ', ') }
-                    if ($config.Include) { $controls['txtInclude'].Text = ($config.Include -join ', ') }
-                    if ($config.LogPath) { 
-                        $controls['txtLogPath'].Text = $config.LogPath
-                        $controls['chkLogPath'].IsChecked = $true
-                    }
-                    if ($config.OutputPath) { 
-                        $controls['txtOutputPath'].Text = $config.OutputPath
-                        $controls['chkOutputCSV'].IsChecked = $true
-                    }
-                    if ($config.HtmlReport) { 
-                        $controls['txtHtmlPath'].Text = $config.HtmlReport
-                        $controls['chkHtmlReport'].IsChecked = $true
-                    }
-                    if ($config.BackupPath) { 
-                        $controls['txtBackupPath'].Text = $config.BackupPath
-                        $controls['chkBackup'].IsChecked = $true
-                    }
-                    & $script:WriteGuiOutput -Text "Configuration loaded from $($open.FileName)" -Color "Green"
-                    & $script:WriteGuiOutput -Text "[Config] Applied: DaysInactive=$($controls['sldDaysInactive'].Value), Exclude=$($controls['txtExclude'].Text), Include=$($controls['txtInclude'].Text)" -Color 'Gray'
+                    $config = Get-Content $open.FileName -Raw | ConvertFrom-Json
+                    & $script:ApplyConfig -config $config -source $open.FileName
                 }
                 catch {
                     & $script:WriteGuiOutput -Text "[Config] ERROR: Failed to load config: $($_.Exception.Message)" -Color 'Red'
@@ -1338,19 +1394,58 @@ begin {
             if ($save.ShowDialog() -eq "OK") {
                 & $script:WriteGuiOutput -Text "[Config] Saving configuration to: $($save.FileName)" -Color 'Gray'
                 try {
-                    $config = @{
-                        DaysInactive = $controls['sldDaysInactive'].Value
-                        Exclude = @($controls['txtExclude'].Text -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-                        Include = @($controls['txtInclude'].Text -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+                    $config = [ordered]@{
+                        # Connection
+                        RemoteComputers = [bool]$controls['rbRemoteComputers'].IsChecked
+                        ComputerList    = $controls['txtComputerList'].Text
+                        
+                        # Age / Type
+                        DaysInactive    = [int]$controls['sldDaysInactive'].Value
+                        AgeMethod       = $controls['cmbAgeMethod'].SelectedIndex
+                        ProfileType     = $controls['cmbProfileType'].SelectedIndex
+                        
+                        # Pattern filters
+                        Exclude         = @($controls['txtExclude'].Text -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+                        Include         = @($controls['txtInclude'].Text -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+                        
+                        # Size filters
+                        MinSize         = $controls['txtMinSize'].Text
+                        MaxSize         = $controls['txtMaxSize'].Text
+                        
+                        # Operation mode
+                        DeleteMode      = [bool]$controls['rbModeDelete'].IsChecked
+                        
+                        # Action checkboxes
+                        IncludeCorrupted = [bool]$controls['chkIncludeCorrupted'].IsChecked
+                        FixCorruption    = [bool]$controls['chkFixCorruption'].IsChecked
+                        ShowSpace        = [bool]$controls['chkShowSpace'].IsChecked
+                        Detailed         = [bool]$controls['chkDetailed'].IsChecked
+                        UnloadHives      = [bool]$controls['chkUnloadHives'].IsChecked
+                        IgnoreActive     = [bool]$controls['chkIgnoreActive'].IsChecked
+                        IncludeSystem    = [bool]$controls['chkIncludeSystem'].IsChecked
+                        IncludeSpecial   = [bool]$controls['chkIncludeSpecial'].IsChecked
+                        Force            = [bool]$controls['chkForce'].IsChecked
+                        Interactive      = [bool]$controls['chkInteractive'].IsChecked
+                        Quiet            = [bool]$controls['chkQuiet'].IsChecked
+                        TestMode         = [bool]$controls['chkTestMode'].IsChecked
+                        
+                        # Parallel
+                        UseParallel      = [bool]$controls['chkUseParallel'].IsChecked
+                        ThrottleLimit    = [int]$controls['sldThrottle'].Value
+                        
+                        # Output paths
+                        LogPath          = if ($controls['chkLogPath'].IsChecked) { $controls['txtLogPath'].Text } else { '' }
+                        OutputPath       = if ($controls['chkOutputCSV'].IsChecked) { $controls['txtOutputPath'].Text } else { '' }
+                        HtmlReport       = if ($controls['chkHtmlReport'].IsChecked) { $controls['txtHtmlPath'].Text } else { '' }
+                        BackupPath       = if ($controls['chkBackup'].IsChecked) { $controls['txtBackupPath'].Text } else { '' }
+                        
+                        # Email
+                        SmtpServer       = $controls['txtSmtpServer'].Text
+                        EmailTo          = $controls['txtEmailTo'].Text
+                        EmailFrom        = $controls['txtEmailFrom'].Text
                     }
-                    if ($controls['chkLogPath'].IsChecked -and $controls['txtLogPath'].Text) { $config.LogPath = $controls['txtLogPath'].Text }
-                    if ($controls['chkOutputCSV'].IsChecked -and $controls['txtOutputPath'].Text) { $config.OutputPath = $controls['txtOutputPath'].Text }
-                    if ($controls['chkHtmlReport'].IsChecked -and $controls['txtHtmlPath'].Text) { $config.HtmlReport = $controls['txtHtmlPath'].Text }
-                    if ($controls['chkBackup'].IsChecked -and $controls['txtBackupPath'].Text) { $config.BackupPath = $controls['txtBackupPath'].Text }
-                    if ($controls['txtSmtpServer'].Text) { $config.SmtpServer = $controls['txtSmtpServer'].Text }
-                    if ($controls['txtEmailTo'].Text) { $config.EmailTo = $controls['txtEmailTo'].Text }
                     
-                    $config | ConvertTo-Json -Depth 3 | Out-File $save.FileName
+                    $config | ConvertTo-Json -Depth 3 | Out-File $save.FileName -Encoding UTF8
                     & $script:WriteGuiOutput -Text "Configuration saved to $($save.FileName)" -Color "Green"
                 }
                 catch {
@@ -2404,19 +2499,33 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
                 Write-DPLog -Message "  [Sessions] quser not available or failed" -Level 'DEBUG'
             }
             
-            # Method 2: Get logged on users via WMI
-            Write-DPLog -Message "  [Sessions] Method 2: WMI Win32_LoggedOnUser" -Level 'DEBUG'
+            # Method 2: Get interactive logon sessions via WMI Win32_LogonSession
+            #   (Win32_LoggedOnUser returns loaded hives, NOT actual sessions - too many false positives)
+            Write-DPLog -Message "  [Sessions] Method 2: WMI Win32_LogonSession (Interactive/RemoteInteractive)" -Level 'DEBUG'
             try {
-                $loggedOn = Get-WmiObject -Class Win32_LoggedOnUser -ComputerName $ComputerName -ErrorAction SilentlyContinue @script:CredentialSplat |
-                    ForEach-Object { 
-                        $_.Antecedent -match 'Domain="([^"]+)",Name="([^"]+)"' | Out-Null
-                        "$($matches[1])\$($matches[2])"
-                    } | Select-Object -Unique
-                $sessions += $loggedOn
-                Write-DPLog -Message "  [Sessions] WMI found $(@($loggedOn).Count) logged-on user(s)" -Level 'DEBUG'
+                $logonSessions = Get-WmiObject -Class Win32_LogonSession -ComputerName $ComputerName -ErrorAction SilentlyContinue @script:CredentialSplat |
+                    Where-Object { $_.LogonType -eq 2 -or $_.LogonType -eq 10 -or $_.LogonType -eq 11 }  # 2=Interactive, 10=RemoteInteractive, 11=CachedInteractive
+                if ($logonSessions) {
+                    $wmiSessions = @()
+                    foreach ($ls in $logonSessions) {
+                        $related = Get-WmiObject -Class Win32_LoggedOnUser -ComputerName $ComputerName -ErrorAction SilentlyContinue @script:CredentialSplat |
+                            Where-Object { $_.Dependent -like "*LogonId=`"$($ls.LogonId)`"*" } |
+                            ForEach-Object {
+                                $_.Antecedent -match 'Domain="([^"]+)",Name="([^"]+)"' | Out-Null
+                                "$($matches[1])\$($matches[2])"
+                            }
+                        $wmiSessions += $related
+                    }
+                    $wmiSessions = $wmiSessions | Select-Object -Unique
+                    $sessions += $wmiSessions
+                    Write-DPLog -Message "  [Sessions] WMI interactive sessions found $(@($wmiSessions).Count) user(s)" -Level 'DEBUG'
+                }
+                else {
+                    Write-DPLog -Message "  [Sessions] WMI found no interactive logon sessions" -Level 'DEBUG'
+                }
             }
             catch {
-                Write-DPLog -Message "  [Sessions] WMI LoggedOnUser query failed" -Level 'DEBUG'
+                Write-DPLog -Message "  [Sessions] WMI LogonSession query failed: $($_.Exception.Message)" -Level 'DEBUG'
             }
             
             # Method 3: Get explorer.exe processes
@@ -3281,11 +3390,14 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
             }
             Write-DPLog -Message "  [Profile] $userName passed all filters" -Level 'DEBUG'
             
-            # Check for active session
+            # Check for active session (compare short usernames for reliable matching)
             $hasActiveSession = $false
+            $shortName = $userName.Split('\')[-1].ToLower()
             foreach ($session in $activeSessions) {
-                if ($userName -like "*$session*" -or $session -like "*$($userName.Split('\')[-1])") {
+                $sessionShort = $session.Split('\')[-1].ToLower()
+                if ($shortName -eq $sessionShort) {
                     $hasActiveSession = $true
+                    Write-DPLog -Message "  [Profile] $userName matched active session: $session" -Level 'DEBUG'
                     break
                 }
             }

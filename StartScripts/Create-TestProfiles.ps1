@@ -32,13 +32,13 @@
 
 .NOTES
     Requires Administrator privileges.
-    Only creates LOCAL accounts — safe for domain-joined machines.
+    Only creates LOCAL accounts - safe for domain-joined machines.
 #>
 
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [switch]$Remove,
-    [string]$Password = 'T3stP@ss!2026'
+    [SecureString]$Password = (ConvertTo-SecureString 'T3stP@ss!2026' -AsPlainText -Force)
 )
 
 #Requires -RunAsAdministrator
@@ -56,7 +56,7 @@ $testUsers = @(
     @{ Name = 'TestUser_Service1'; DaysOld = 120; SizeMB = 1;  Desc = 'Matches *service* exclude' }
 )
 
-$securePass = ConvertTo-SecureString $Password -AsPlainText -Force
+$securePass = $Password
 
 # ── Remove Mode ────────────────────────────────────────────────────────────────
 if ($Remove) {
@@ -65,42 +65,75 @@ if ($Remove) {
         $name = $user.Name
         Write-Host "  [$name] " -NoNewline
 
-        # Remove local account (also removes profile via -DeleteProfile in newer Windows)
         try {
             $account = Get-LocalUser -Name $name -ErrorAction SilentlyContinue
-            if ($account) {
-                # Get profile path from registry
+            if (-not $account) {
+                Write-Host "not found (skipped)" -ForegroundColor DarkGray
+                continue
+            }
+            
+            # Resolve SID for profile lookup
+            $sid = $null
+            try {
                 $sid = (New-Object System.Security.Principal.NTAccount($name)).Translate(
                     [System.Security.Principal.SecurityIdentifier]).Value
+            } catch {}
+            
+            # Remove the local user account first
+            Remove-LocalUser -Name $name -ErrorAction Stop
+            Write-Host "account removed" -ForegroundColor Green -NoNewline
+            
+            # Use Win32_UserProfile to properly delete the profile (folder + registry)
+            $profileDeleted = $false
+            if ($sid) {
+                $userProfile = Get-CimInstance -ClassName Win32_UserProfile -Filter "SID='$sid'" -ErrorAction SilentlyContinue
+                if ($userProfile) {
+                    try {
+                        # Unload hive first if loaded
+                        $hivePath = "Registry::HKEY_USERS\$sid"
+                        if (Test-Path $hivePath) {
+                            [gc]::Collect(); [gc]::WaitForPendingFinalizers()
+                            $null = & reg.exe unload "HKU\$sid" 2>&1
+                        }
+                        Remove-CimInstance -InputObject $userProfile -ErrorAction Stop
+                        $profileDeleted = $true
+                        Write-Host ", profile deleted (WMI)" -ForegroundColor Green
+                    }
+                    catch {
+                        Write-Host ", WMI delete failed: $($_.Exception.Message)" -ForegroundColor Yellow -NoNewline
+                    }
+                }
+            }
+            
+            # Fallback: force-remove folder and registry key if WMI didn't handle it
+            $profilePath = "C:\Users\$name"
+            if (-not $profileDeleted -and (Test-Path $profilePath)) {
+                # Unload hive if still loaded
+                if ($sid) {
+                    $hivePath = "Registry::HKEY_USERS\$sid"
+                    if (Test-Path $hivePath) {
+                        [gc]::Collect(); [gc]::WaitForPendingFinalizers()
+                        $null = & reg.exe unload "HKU\$sid" 2>&1
+                        Start-Sleep -Milliseconds 500
+                    }
+                }
+                Remove-Item $profilePath -Recurse -Force -ErrorAction Stop
+                Write-Host ", folder deleted (fallback)" -ForegroundColor Green -NoNewline
+            }
+            
+            # Clean up orphaned registry key
+            if ($sid) {
                 $regPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid"
-                $profilePath = $null
-                if (Test-Path $regPath) {
-                    $profilePath = (Get-ItemProperty $regPath -ErrorAction SilentlyContinue).ProfileImagePath
-                }
-
-                Remove-LocalUser -Name $name -ErrorAction Stop
-                Write-Host "account removed" -ForegroundColor Green -NoNewline
-
-                # Clean up profile folder if it still exists
-                if ($profilePath -and (Test-Path $profilePath)) {
-                    Remove-Item $profilePath -Recurse -Force -ErrorAction SilentlyContinue
-                    Write-Host ", folder deleted" -ForegroundColor Green
-                }
-                else {
-                    Write-Host "" 
-                }
-
-                # Clean up orphaned registry key
                 if (Test-Path $regPath) {
                     Remove-Item $regPath -Force -ErrorAction SilentlyContinue
+                    Write-Host ", registry cleaned" -ForegroundColor Green -NoNewline
                 }
             }
-            else {
-                Write-Host "not found (skipped)" -ForegroundColor DarkGray
-            }
+            
+            Write-Host ""
         }
         catch {
-            Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
+            Write-Host " ERROR: $($_.Exception.Message)" -ForegroundColor Red
         }
     }
     Write-Host "`nDone.`n" -ForegroundColor Cyan
@@ -138,12 +171,35 @@ foreach ($user in $testUsers) {
     }
 
     # 2. Force profile creation by running a process as the user
-    #    (This creates the profile folder, NTUSER.DAT, etc.)
+    #    (This creates the profile folder, NTUSER.DAT, registry entry, etc.)
     $profilePath = "C:\Users\$name"
+    
+    # Check if profile is registered in the registry (not just folder existing)
+    $needsLogon = $false
     if (-not (Test-Path $profilePath)) {
+        $needsLogon = $true
+    }
+    else {
+        # Folder exists - check if profile is actually registered in the registry
+        $sid = $null
+        try {
+            $sid = (New-Object System.Security.Principal.NTAccount($name)).Translate(
+                [System.Security.Principal.SecurityIdentifier]).Value
+        } catch {}
+        $regKey = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid"
+        if (-not $sid -or -not (Test-Path $regKey)) {
+            Write-Host "  Profile folder exists but NOT registered in registry - re-creating..." -ForegroundColor Yellow
+            Remove-Item $profilePath -Recurse -Force -ErrorAction SilentlyContinue
+            $needsLogon = $true
+        }
+        else {
+            Write-Host "  Profile registered OK" -ForegroundColor DarkGray
+        }
+    }
+    
+    if ($needsLogon) {
         Write-Host "  Creating profile (first logon simulation)..." -NoNewline
         try {
-            # Start a process as the user to trigger profile creation
             $psi = New-Object System.Diagnostics.ProcessStartInfo
             $psi.FileName = "$env:SystemRoot\System32\cmd.exe"
             $psi.Arguments = '/c echo profile_init'
@@ -161,7 +217,6 @@ foreach ($user in $testUsers) {
             $proc.WaitForExit(15000) | Out-Null
             if (-not $proc.HasExited) { $proc.Kill() }
             
-            # Wait briefly for profile folder to appear
             Start-Sleep -Seconds 2
             
             if (Test-Path $profilePath) {
@@ -176,9 +231,6 @@ foreach ($user in $testUsers) {
             Write-Host " ERROR: $($_.Exception.Message)" -ForegroundColor Red
             continue
         }
-    }
-    else {
-        Write-Host "  Profile folder exists" -ForegroundColor DarkGray
     }
 
     # 3. Populate profile with dummy data to reach target size
@@ -213,7 +265,32 @@ foreach ($user in $testUsers) {
         }
     }
 
-    # 4. Set NTUSER.DAT and profile folder timestamps to simulate age
+    # 4. Unload any loaded registry hives for this user
+    #    (Prevents WMI Win32_LoggedOnUser from reporting them as "active sessions")
+    $sid = $null
+    try {
+        $sid = (New-Object System.Security.Principal.NTAccount($name)).Translate(
+            [System.Security.Principal.SecurityIdentifier]).Value
+    } catch {}
+    if ($sid) {
+        # Check if hive is loaded under HKU
+        $hivePath = "Registry::HKEY_USERS\$sid"
+        if (Test-Path $hivePath) {
+            Write-Host "  Unloading registry hive..." -NoNewline
+            # Close any handles then unload
+            [gc]::Collect()
+            [gc]::WaitForPendingFinalizers()
+            $null = & reg.exe unload "HKU\$sid" 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host " done" -ForegroundColor Green
+            }
+            else {
+                Write-Host " skipped (hive in use - will clear on reboot)" -ForegroundColor DarkGray
+            }
+        }
+    }
+
+    # 5. Set NTUSER.DAT and profile folder timestamps to simulate age
     if ($daysOld -gt 0) {
         $targetDate = (Get-Date).AddDays(-$daysOld)
         Write-Host "  Setting timestamps to $($targetDate.ToString('yyyy-MM-dd'))..." -NoNewline
