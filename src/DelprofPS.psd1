@@ -27,14 +27,7 @@
     RequiredAssemblies = @()
 
     # Files to package with this module
-    FileList = @(
-        '..\delprofPS.ps1',
-        '..\config\DelprofPS.config.json',
-        '..\tests\DelprofPS.Tests.ps1',
-        '..\docs\README.md',
-        '..\docs\CHANGELOG.md',
-        '..\docs\LICENSE'
-    )
+    FileList = @()
 
     # Private data / PSGallery metadata
     PrivateData = @{
