@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added - Quality & Security Hardening
+
+#### Strategy & Conceptualisation
+- **PowerShell module manifest** (`DelprofPS.psd1`) for PSGallery-ready distribution
+- **CONTRIBUTING.md** with development guidelines, PR checklist, and commit conventions
+- **PSScriptAnalyzer settings** (`PSScriptAnalyzerSettings.psd1`) for enforced code quality
+- **Fixed repository URLs** in README (replaced placeholder `yourusername`)
+
+#### Security & Data Integrity
+- **Config file schema validation** - JSON configs validated against expected types and ranges before applying
+- **ComputerName input sanitisation** - Hostnames validated against RFC-compliant patterns to prevent injection
+- **Log integrity hashing** - SHA256 hash appended to log files at end of each run for tamper detection
+- **Script self-integrity verification** - SHA256 hash check on script file at startup with optional `-VerifyIntegrity` parameter
+
+#### DevOps & Infrastructure
+- **GitHub Actions CI/CD pipeline** (`.github/workflows/ci.yml`) with PSScriptAnalyzer linting and Pester test execution
+- **Build & release script** (`Build.ps1`) for automated versioning, linting, testing, and packaging
+- **Pester test wrapper** (`DelprofPS.Pester.Tests.ps1`) bridging existing test suite into Pester framework
+
+#### GUI Enhancements
+- **Profiles tab** with DataGrid listing all current profiles (username, path, SID, size, last modified, status)
+- **Force Remove Selected** button for targeted profile removal with confirmation dialog
+- **Select All / Deselect All** buttons for batch selection
+- **Refresh Profiles** button supporting local and remote computer scanning
+
 ## [2.0.0] - 2024
 
 ### Added - Major Enterprise Release

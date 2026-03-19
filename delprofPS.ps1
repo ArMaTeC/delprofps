@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Delprof2-PS v2.0 - Enterprise-grade PowerShell replacement for Delprof2 with advanced features.
@@ -140,6 +140,16 @@
 .PARAMETER Detailed
     Show detailed folder breakdown for each profile (Documents, Downloads, Desktop, etc.)
 
+.PARAMETER VerifyIntegrity
+    Verify the script's SHA256 hash against DelprofPS.sha256 before execution.
+    Exits with error if hash mismatch detected (unless -Force is also specified).
+    Generate the hash file with: (Get-FileHash .\delprofPS.ps1 -Algorithm SHA256).Hash | Out-File .\DelprofPS.sha256
+
+.PARAMETER Credential
+    PSCredential object for authenticating to remote computers.
+    Useful for cross-domain scenarios or when the current identity lacks access.
+    If not specified, the current user's identity is used.
+
 .EXAMPLE
     # List all profiles older than 30 days on local computer (dry run)
     .\DelprofPS.ps1
@@ -221,11 +231,12 @@
     - 1002: Script completed
     - 1005: Error - admin rights required
     - 1010: Profile deleted
+    - 1012: Corruption repair action taken
     
 .LINK
     Original Delprof2: https://helgeklein.com/delprof2/
 #>
-[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
+[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High', DefaultParameterSetName = 'List')]
 param (
     [Parameter(ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
     [Alias('CN', 'MachineName', 'Server')]
@@ -233,6 +244,7 @@ param (
 
     [Parameter()]
     [Alias('Age', 'Days')]
+    [ValidateRange(0, 3650)]
     [int]$DaysInactive = 30,
 
     [Parameter()]
@@ -245,16 +257,16 @@ param (
     [Parameter()]
     [string[]]$Exclude,
 
-    [Parameter()]
+    [Parameter(ParameterSetName = 'Delete')]
     [switch]$Delete,
 
     [Parameter()]
     [switch]$Force,
 
-    [Parameter()]
+    [Parameter(ParameterSetName = 'UI')]
     [switch]$UI,
 
-    [Parameter()]
+    [Parameter(ParameterSetName = 'Preview')]
     [switch]$Preview,
 
     [Parameter()]
@@ -264,9 +276,11 @@ param (
     [switch]$UnloadHives,
 
     [Parameter()]
+    [ValidateRange(0, 50)]
     [int]$MaxRetries = 3,
 
     [Parameter()]
+    [ValidateRange(1, 60)]
     [int]$RetryDelaySeconds = 2,
 
     [Parameter()]
@@ -303,10 +317,10 @@ param (
     [ValidateSet('Local', 'Roaming', 'Temporary', 'Mandatory', 'All')]
     [string]$ProfileType = 'All',
 
-    [Parameter()]
+    [Parameter(ParameterSetName = 'Interactive')]
     [switch]$Interactive,
 
-    [Parameter()]
+    [Parameter(ParameterSetName = 'Test')]
     [switch]$Test,
 
     [Parameter()]
@@ -322,6 +336,7 @@ param (
     [switch]$UseParallel,
 
     [Parameter()]
+    [ValidateRange(1, 100)]
     [int]$ThrottleLimit = 5,
 
     [Parameter()]
@@ -334,7 +349,15 @@ param (
     [string]$EmailFrom = "delprofps@$env:COMPUTERNAME",
 
     [Parameter()]
-    [switch]$Detailed
+    [switch]$Detailed,
+
+    [Parameter()]
+    [switch]$VerifyIntegrity,
+
+    [Parameter()]
+    [System.Management.Automation.PSCredential]
+    [System.Management.Automation.Credential()]
+    $Credential = [System.Management.Automation.PSCredential]::Empty
 )
 
 begin {
@@ -410,6 +433,42 @@ begin {
                     <TextBlock Grid.Row="1" Text="Computer Names (one per line or comma-separated):" Margin="0,0,0,5"/>
                     <TextBox Grid.Row="2" x:Name="txtComputerList" AcceptsReturn="True" VerticalScrollBarVisibility="Auto"
                              TextWrapping="Wrap" FontFamily="Consolas" FontSize="12"/>
+                </Grid>
+            </TabItem>
+            
+            <!-- Profiles Tab -->
+            <TabItem Header="Profiles">
+                <Grid Margin="10">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
+                        <Button x:Name="btnRefreshProfiles" Content="Refresh Profiles" Background="#17A2B8" Padding="10,6" Margin="0,0,5,0"/>
+                        <Button x:Name="btnSelectAll" Content="Select All" Background="#6C757D" Padding="10,6" Margin="0,0,5,0"/>
+                        <Button x:Name="btnDeselectAll" Content="Deselect All" Background="#6C757D" Padding="10,6" Margin="0,0,5,0"/>
+                        <Button x:Name="btnForceRemove" Content="Force Remove Selected" Background="#DC3545" Padding="10,6" Margin="10,0,0,0"/>
+                        <TextBlock x:Name="txtProfileCount" Text="" VerticalAlignment="Center" Margin="15,0,0,0" FontStyle="Italic" Foreground="#555555"/>
+                    </StackPanel>
+                    <DataGrid Grid.Row="1" x:Name="dgProfiles" AutoGenerateColumns="False" CanUserAddRows="False"
+                              CanUserDeleteRows="False" IsReadOnly="False" SelectionMode="Extended"
+                              HeadersVisibility="Column" GridLinesVisibility="Horizontal"
+                              AlternatingRowBackground="#F9F9F9" RowBackground="White"
+                              BorderBrush="#CCCCCC" BorderThickness="1"
+                              VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto">
+                        <DataGrid.Columns>
+                            <DataGridCheckBoxColumn Header="Select" Binding="{Binding Selected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="55"/>
+                            <DataGridTextColumn Header="Username" Binding="{Binding UserName}" Width="150" IsReadOnly="True"/>
+                            <DataGridTextColumn Header="Profile Path" Binding="{Binding ProfilePath}" Width="250" IsReadOnly="True"/>
+                            <DataGridTextColumn Header="SID" Binding="{Binding SID}" Width="280" IsReadOnly="True"/>
+                            <DataGridTextColumn Header="Size (MB)" Binding="{Binding SizeMB}" Width="80" IsReadOnly="True"/>
+                            <DataGridTextColumn Header="Last Modified" Binding="{Binding LastModified}" Width="140" IsReadOnly="True"/>
+                            <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="80" IsReadOnly="True"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+                    <TextBlock Grid.Row="2" Text="Select profiles above and click 'Force Remove Selected' to delete them regardless of age filters." 
+                               Foreground="#888888" FontSize="11" Margin="0,8,0,0" TextWrapping="Wrap"/>
                 </Grid>
             </TabItem>
             
@@ -628,8 +687,10 @@ begin {
         
         # Get controls reference
         $controls = @{}
-        $xaml.SelectNodes("//*[@x:Name]") | ForEach-Object {
-            $name = $_.Name
+        $nsMgr = New-Object System.Xml.XmlNamespaceManager($xaml.NameTable)
+        $nsMgr.AddNamespace('x', 'http://schemas.microsoft.com/winfx/2006/xaml')
+        $xaml.SelectNodes("//*[@x:Name]", $nsMgr) | ForEach-Object {
+            $name = $_.GetAttribute('Name', 'http://schemas.microsoft.com/winfx/2006/xaml')
             $controls[$name] = $window.FindName($name)
         }
         
@@ -654,6 +715,287 @@ begin {
         # Event Handler: Days Slider
         $controls['sldDaysInactive'].Add_ValueChanged({
             $controls['txtDaysValue'].Text = "$($controls['sldDaysInactive'].Value) days"
+        })
+        
+        # Profile list data source
+        $script:profileList = [System.Collections.ObjectModel.ObservableCollection[PSObject]]::new()
+        $controls['dgProfiles'].ItemsSource = $script:profileList
+        
+        # Helper: Enumerate profiles on a computer
+        $script:RefreshProfileList = {
+            param([string]$TargetComputer)
+            $script:profileList.Clear()
+            $controls['txtProfileCount'].Text = "Scanning..."
+            [System.Windows.Forms.Application]::DoEvents()
+            
+            try {
+                $profileListPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList"
+                $isLocal = ($TargetComputer -eq $env:COMPUTERNAME -or $TargetComputer -eq 'localhost' -or $TargetComputer -eq '.')
+                
+                # System/special profile names to flag
+                $systemNames = @('Default', 'Default User', 'Public', 'SYSTEM', 'LocalService', 'NetworkService', 'systemprofile', 'LocalService', 'NetworkService')
+                
+                if ($isLocal) {
+                    $profileKeys = Get-ChildItem $profileListPath -ErrorAction Stop | 
+                        Where-Object { $_.PSChildName -match '^S-1-5-21' }
+                    
+                    foreach ($key in $profileKeys) {
+                        try {
+                            $props = Get-ItemProperty $key.PSPath
+                            $sid = $key.PSChildName
+                            $profilePath = $props.ProfileImagePath
+                            
+                            # Resolve username
+                            $userName = $null
+                            try {
+                                $secId = New-Object System.Security.Principal.SecurityIdentifier($sid)
+                                $ntAccount = $secId.Translate([System.Security.Principal.NTAccount])
+                                $userName = $ntAccount.Value
+                            } catch {
+                                $userName = "(Unresolvable)"
+                            }
+                            
+                            # Get folder size and last modified
+                            $sizeMB = "N/A"
+                            $lastMod = "N/A"
+                            if ($profilePath -and (Test-Path $profilePath)) {
+                                try {
+                                    $dirInfo = Get-Item $profilePath -ErrorAction SilentlyContinue
+                                    $lastMod = $dirInfo.LastWriteTime.ToString("yyyy-MM-dd HH:mm")
+                                    $ntUserDat = Join-Path $profilePath "NTUSER.DAT"
+                                    if (Test-Path $ntUserDat) {
+                                        $lastMod = (Get-Item $ntUserDat -Force -ErrorAction SilentlyContinue).LastWriteTime.ToString("yyyy-MM-dd HH:mm")
+                                    }
+                                    $totalSize = (Get-ChildItem $profilePath -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+                                    $sizeMB = [math]::Round($totalSize / 1MB, 1)
+                                } catch {
+                                    $sizeMB = "Error"
+                                }
+                            }
+                            
+                            # Determine status
+                            $status = "OK"
+                            $shortName = if ($userName) { ($userName -split '\\')[-1] } else { "" }
+                            if ($systemNames -contains $shortName) {
+                                $status = "System"
+                            }
+                            elseif (-not $profilePath -or -not (Test-Path $profilePath)) {
+                                $status = "Orphaned"
+                            }
+                            
+                            $profileObj = [PSCustomObject]@{
+                                Selected = $false
+                                UserName = $userName
+                                ProfilePath = $profilePath
+                                SID = $sid
+                                SizeMB = $sizeMB
+                                LastModified = $lastMod
+                                Status = $status
+                            }
+                            $script:profileList.Add($profileObj)
+                        }
+                        catch {
+                            & $script:WriteGuiOutput -Text "Error reading profile $($key.PSChildName): $_" -Color "Red"
+                        }
+                    }
+                }
+                else {
+                    # Remote computer via WMI
+                    $regProv = Get-WmiObject -ComputerName $TargetComputer -Class StdRegProv -Namespace 'root\default' -ErrorAction Stop
+                    $enumResult = $regProv.EnumKey(2147483650, 'SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList')
+                    $sids = $enumResult.sNames | Where-Object { $_ -match '^S-1-5-21' }
+                    
+                    foreach ($sid in $sids) {
+                        try {
+                            $pathResult = $regProv.GetStringValue(2147483650, "SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid", 'ProfileImagePath')
+                            $profilePath = $pathResult.sValue
+                            if ($profilePath) { $profilePath = $profilePath -replace '%SystemDrive%', 'C:' }
+                            
+                            $userName = $null
+                            try {
+                                $secId = New-Object System.Security.Principal.SecurityIdentifier($sid)
+                                $ntAccount = $secId.Translate([System.Security.Principal.NTAccount])
+                                $userName = $ntAccount.Value
+                            } catch {
+                                $userName = "(Unresolvable)"
+                            }
+                            
+                            $profileObj = [PSCustomObject]@{
+                                Selected = $false
+                                UserName = $userName
+                                ProfilePath = $profilePath
+                                SID = $sid
+                                SizeMB = "Remote"
+                                LastModified = "Remote"
+                                Status = "OK"
+                            }
+                            $script:profileList.Add($profileObj)
+                        }
+                        catch {
+                            & $script:WriteGuiOutput -Text "Error reading remote profile $sid`: $_" -Color "Red"
+                        }
+                    }
+                }
+                
+                $controls['txtProfileCount'].Text = "$($script:profileList.Count) profiles found"
+                & $script:WriteGuiOutput -Text "Found $($script:profileList.Count) profiles on $TargetComputer" -Color "Cyan"
+            }
+            catch {
+                $controls['txtProfileCount'].Text = "Error scanning profiles"
+                & $script:WriteGuiOutput -Text "Failed to enumerate profiles: $($_.Exception.Message)" -Color "Red"
+            }
+        }
+        
+        # Event Handler: Refresh Profiles
+        $controls['btnRefreshProfiles'].Add_Click({
+            $targetComputer = $env:COMPUTERNAME
+            if ($controls['rbRemoteComputers'].IsChecked -and $controls['txtComputerList'].Text) {
+                $computers = $controls['txtComputerList'].Text -split "[\r\n,]+" | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+                if ($computers.Count -gt 0) { $targetComputer = $computers[0] }
+            }
+            & $script:RefreshProfileList -TargetComputer $targetComputer
+        })
+        
+        # Event Handler: Select All
+        $controls['btnSelectAll'].Add_Click({
+            foreach ($item in $script:profileList) {
+                $item.Selected = $true
+            }
+            $controls['dgProfiles'].Items.Refresh()
+        })
+        
+        # Event Handler: Deselect All
+        $controls['btnDeselectAll'].Add_Click({
+            foreach ($item in $script:profileList) {
+                $item.Selected = $false
+            }
+            $controls['dgProfiles'].Items.Refresh()
+        })
+        
+        # Event Handler: Force Remove Selected
+        $controls['btnForceRemove'].Add_Click({
+            if ($script:guiRunning) {
+                [System.Windows.MessageBox]::Show("An operation is already running. Please wait.", "Busy", "OK", "Warning")
+                return
+            }
+            
+            $selected = @($script:profileList | Where-Object { $_.Selected -eq $true })
+            if ($selected.Count -eq 0) {
+                [System.Windows.MessageBox]::Show("No profiles selected. Use the checkboxes to select profiles to remove.", "No Selection", "OK", "Information")
+                return
+            }
+            
+            $userList = ($selected | ForEach-Object { "$($_.UserName) ($($_.SID))" }) -join "`n"
+            $confirm = [System.Windows.MessageBox]::Show(
+                "Are you sure you want to FORCE REMOVE the following $($selected.Count) profile(s)?`n`n$userList`n`nThis action CANNOT be undone!",
+                "Confirm Force Removal",
+                "YesNo",
+                "Warning"
+            )
+            
+            if ($confirm -ne 'Yes') { return }
+            
+            $script:guiRunning = $true
+            $controls['btnForceRemove'].IsEnabled = $false
+            $controls['progressBar'].Visibility = "Visible"
+            $controls['progressBar'].IsIndeterminate = $true
+            
+            $targetComputer = $env:COMPUTERNAME
+            if ($controls['rbRemoteComputers'].IsChecked -and $controls['txtComputerList'].Text) {
+                $computers = $controls['txtComputerList'].Text -split "[\r\n,]+" | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+                if ($computers.Count -gt 0) { $targetComputer = $computers[0] }
+            }
+            
+            $isLocal = ($targetComputer -eq $env:COMPUTERNAME -or $targetComputer -eq 'localhost' -or $targetComputer -eq '.')
+            $removedCount = 0
+            $failedCount = 0
+            
+            foreach ($prof in $selected) {
+                & $script:WriteGuiOutput -Text "Removing profile: $($prof.UserName) [$($prof.SID)]..." -Color "Yellow"
+                [System.Windows.Forms.Application]::DoEvents()
+                
+                $success = $true
+                
+                # Step 1: Unload registry hive if loaded
+                try {
+                    if ($isLocal) {
+                        $hiveLoaded = Test-Path "Registry::HKEY_USERS\$($prof.SID)"
+                        if ($hiveLoaded) {
+                            & $script:WriteGuiOutput -Text "  Unloading registry hive for $($prof.UserName)..." -Color "Gray"
+                            $null = & reg.exe unload "HKU\$($prof.SID)" 2>&1
+                        }
+                    }
+                } catch {
+                    & $script:WriteGuiOutput -Text "  Warning: Could not unload hive: $_" -Color "Yellow"
+                }
+                
+                # Step 2: Remove registry entry
+                try {
+                    if ($isLocal) {
+                        $regKey = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$($prof.SID)"
+                        if (Test-Path $regKey) {
+                            Remove-Item -Path $regKey -Recurse -Force -ErrorAction Stop
+                            & $script:WriteGuiOutput -Text "  Registry entry removed." -Color "Gray"
+                        }
+                    }
+                    else {
+                        Invoke-Command -ComputerName $targetComputer -ScriptBlock {
+                            param($sid)
+                            $regPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid"
+                            if (Test-Path $regPath) {
+                                Remove-Item -Path $regPath -Recurse -Force -ErrorAction Stop
+                            }
+                        } -ArgumentList $prof.SID -ErrorAction Stop
+                        & $script:WriteGuiOutput -Text "  Remote registry entry removed." -Color "Gray"
+                    }
+                }
+                catch {
+                    & $script:WriteGuiOutput -Text "  ERROR removing registry: $($_.Exception.Message)" -Color "Red"
+                    $success = $false
+                }
+                
+                # Step 3: Remove profile folder
+                if ($prof.ProfilePath) {
+                    try {
+                        $folderPath = $prof.ProfilePath
+                        if (-not $isLocal) {
+                            $folderPath = "\\$targetComputer\" + ($prof.ProfilePath -replace ':', '$')
+                        }
+                        if (Test-Path $folderPath) {
+                            Remove-Item -Path $folderPath -Recurse -Force -ErrorAction Stop
+                            & $script:WriteGuiOutput -Text "  Profile folder removed." -Color "Gray"
+                        }
+                        else {
+                            & $script:WriteGuiOutput -Text "  Profile folder not found (already removed or orphaned)." -Color "Gray"
+                        }
+                    }
+                    catch {
+                        & $script:WriteGuiOutput -Text "  ERROR removing folder: $($_.Exception.Message)" -Color "Red"
+                        $success = $false
+                    }
+                }
+                
+                if ($success) {
+                    $removedCount++
+                    & $script:WriteGuiOutput -Text "  Successfully removed $($prof.UserName)." -Color "Green"
+                }
+                else {
+                    $failedCount++
+                    & $script:WriteGuiOutput -Text "  FAILED to fully remove $($prof.UserName)." -Color "Red"
+                }
+            }
+            
+            & $script:WriteGuiOutput -Text "---" -Color "Gray"
+            & $script:WriteGuiOutput -Text "Force removal complete: $removedCount removed, $failedCount failed." -Color "Cyan"
+            
+            $script:guiRunning = $false
+            $controls['btnForceRemove'].IsEnabled = $true
+            $controls['progressBar'].Visibility = "Collapsed"
+            
+            # Refresh the profile list
+            & $script:RefreshProfileList -TargetComputer $targetComputer
+            
+            [System.Windows.MessageBox]::Show("Force removal complete.`n`nRemoved: $removedCount`nFailed: $failedCount", "Complete", "OK", "Information")
         })
         
         # Event Handler: Browse Buttons
@@ -924,6 +1266,7 @@ begin {
     #region Initialization
     $script:StartTime = Get-Date
     $script:Version = '2.0.0'
+    $script:RunId = [guid]::NewGuid().ToString('N')
     $script:TotalProfilesProcessed = 0
     $script:TotalProfilesDeleted = 0
     $script:TotalSpaceFreed = 0
@@ -944,26 +1287,164 @@ begin {
         'Administrator', 'Guest'
     )
 
-    # Error action preference
-    if ($Force) {
-        $ErrorActionPreference = 'SilentlyContinue'
-    } else {
-        $ErrorActionPreference = 'Stop'
+    # Store Force flag for per-cmdlet use (avoid global $ErrorActionPreference override)
+    $script:ForceErrorAction = if ($Force) { 'SilentlyContinue' } else { 'Stop' }
+
+    # Build credential splat for remote cmdlets (empty when using current identity)
+    $script:CredentialSplat = @{}
+    if ($Credential -ne [System.Management.Automation.PSCredential]::Empty) {
+        $script:CredentialSplat = @{ Credential = $Credential }
     }
 
-    # Load configuration file if specified
+    #region Security - Script Integrity Verification
+    if ($VerifyIntegrity) {
+        $hashFile = Join-Path $PSScriptRoot 'DelprofPS.sha256'
+        if (Test-Path $hashFile) {
+            $expectedHash = (Get-Content $hashFile -Raw).Trim().Split()[0]
+            $actualHash = (Get-FileHash -Path $PSCommandPath -Algorithm SHA256).Hash
+            if ($expectedHash -eq $actualHash) {
+                Write-Host "[INTEGRITY] Script hash verified successfully." -ForegroundColor Green
+            }
+            else {
+                Write-Host "[INTEGRITY] WARNING: Script hash mismatch!" -ForegroundColor Red
+                Write-Host "  Expected: $expectedHash" -ForegroundColor Yellow
+                Write-Host "  Actual:   $actualHash" -ForegroundColor Yellow
+                Write-Host "  The script may have been tampered with." -ForegroundColor Red
+                if (-not $Force) {
+                    Write-Host "  Use -Force to continue anyway, or verify the script source." -ForegroundColor Yellow
+                    exit 1
+                }
+            }
+        }
+        else {
+            Write-Host "[INTEGRITY] No hash file found at $hashFile" -ForegroundColor Yellow
+            Write-Host "  Generate one with: (Get-FileHash .\delprofPS.ps1 -Algorithm SHA256).Hash | Out-File .\DelprofPS.sha256" -ForegroundColor Gray
+        }
+    }
+    #endregion
+
+    #region Security - ComputerName Input Sanitisation
+    $validHostnamePattern = '^[a-zA-Z0-9][a-zA-Z0-9\-\.]{0,253}[a-zA-Z0-9]$|^[a-zA-Z0-9]$|^localhost$|^\.$'
+    $sanitisedComputers = [System.Collections.Generic.List[string]]::new()
+    foreach ($computer in $ComputerName) {
+        $trimmed = $computer.Trim()
+        if ($trimmed -match $validHostnamePattern) {
+            $sanitisedComputers.Add($trimmed)
+        }
+        else {
+            Write-Host "[SECURITY] Rejected invalid computer name: '$trimmed' - does not match RFC hostname pattern" -ForegroundColor Red
+        }
+    }
+    if ($sanitisedComputers.Count -eq 0) {
+        Write-Host "[SECURITY] No valid computer names provided. Exiting." -ForegroundColor Red
+        exit 1
+    }
+    $ComputerName = $sanitisedComputers.ToArray()
+    #endregion
+
+    #region Security - Config Schema Validation & Loading
     if ($ConfigFile -and (Test-Path $ConfigFile)) {
         try {
-            $config = Get-Content $ConfigFile | ConvertFrom-Json
-            # Apply config values only if not already specified via parameters
-            if (-not $PSBoundParameters.ContainsKey('DaysInactive') -and $config.DaysInactive) { $DaysInactive = $config.DaysInactive }
+            $config = Get-Content $ConfigFile -Raw | ConvertFrom-Json
+
+            # Schema validation: check types and ranges
+            $configValid = $true
+            $configWarnings = @()
+
+            if ($null -ne $config.DaysInactive) {
+                if ($config.DaysInactive -is [int] -or $config.DaysInactive -is [long] -or $config.DaysInactive -is [double]) {
+                    if ($config.DaysInactive -lt 0 -or $config.DaysInactive -gt 3650) {
+                        $configWarnings += "DaysInactive ($($config.DaysInactive)) out of valid range 0-3650, ignoring"
+                        $configValid = $false
+                    }
+                }
+                else {
+                    $configWarnings += "DaysInactive is not a number, ignoring"
+                    $configValid = $false
+                }
+            }
+
+            if ($null -ne $config.Exclude) {
+                if ($config.Exclude -isnot [System.Array] -and $config.Exclude -isnot [string]) {
+                    $configWarnings += "Exclude must be an array of strings, ignoring"
+                }
+            }
+
+            if ($null -ne $config.Include) {
+                if ($config.Include -isnot [System.Array] -and $config.Include -isnot [string]) {
+                    $configWarnings += "Include must be an array of strings, ignoring"
+                }
+            }
+
+            if ($null -ne $config.MaxRetries) {
+                if ($config.MaxRetries -is [int] -or $config.MaxRetries -is [long] -or $config.MaxRetries -is [double]) {
+                    if ($config.MaxRetries -lt 0 -or $config.MaxRetries -gt 50) {
+                        $configWarnings += "MaxRetries ($($config.MaxRetries)) out of valid range 0-50, ignoring"
+                    }
+                }
+                else {
+                    $configWarnings += "MaxRetries is not a number, ignoring"
+                }
+            }
+
+            # Reject unexpected/dangerous keys
+            $allowedKeys = @('DaysInactive', 'Exclude', 'Include', 'MaxRetries', 'LogPath', 'OutputPath',
+                             'HtmlReport', 'BackupPath', 'SmtpServer', 'EmailTo', 'EmailFrom',
+                             'AgeCalculation', 'ProfileType', 'RetryDelaySeconds')
+            $configKeys = $config.PSObject.Properties.Name
+            foreach ($key in $configKeys) {
+                if ($key -notin $allowedKeys) {
+                    $configWarnings += "Unknown config key '$key' ignored (not in allowed schema)"
+                }
+            }
+
+            # Report warnings
+            foreach ($warn in $configWarnings) {
+                Write-Host "[CONFIG] WARNING: $warn" -ForegroundColor Yellow
+            }
+
+            # Apply validated config values only if not already specified via parameters
+            if (-not $PSBoundParameters.ContainsKey('DaysInactive') -and $null -ne $config.DaysInactive -and $configValid) {
+                $DaysInactive = [int]$config.DaysInactive
+            }
             if (-not $PSBoundParameters.ContainsKey('Exclude') -and $config.Exclude) { $Exclude = $config.Exclude }
             if (-not $PSBoundParameters.ContainsKey('Include') -and $config.Include) { $Include = $config.Include }
-            if (-not $PSBoundParameters.ContainsKey('MaxRetries') -and $config.MaxRetries) { $MaxRetries = $config.MaxRetries }
-            Write-DPLog -Message "Configuration loaded from $ConfigFile" -Level 'INFO'
+            if (-not $PSBoundParameters.ContainsKey('MaxRetries') -and $null -ne $config.MaxRetries -and
+                $config.MaxRetries -ge 0 -and $config.MaxRetries -le 50) {
+                $MaxRetries = [int]$config.MaxRetries
+            }
+            Write-Host "[CONFIG] Configuration loaded from $ConfigFile" -ForegroundColor Green
         }
         catch {
-            Write-DPLog -Message "Failed to load config file: $($_.Exception.Message)" -Level 'ERROR'
+            Write-Host "[CONFIG] Failed to load config file: $($_.Exception.Message)" -ForegroundColor Red
+        }
+    }
+    #endregion
+
+    #region Path Validation
+    # Validate output paths early to fail fast before processing
+    $pathsToValidate = @{
+        LogPath = $LogPath
+        OutputPath = $OutputPath
+        HtmlReport = $HtmlReport
+        BackupPath = $BackupPath
+    }
+    foreach ($pathEntry in $pathsToValidate.GetEnumerator()) {
+        if ($pathEntry.Value) {
+            $parentDir = Split-Path $pathEntry.Value -Parent
+            if ($parentDir -and -not (Test-Path $parentDir)) {
+                try {
+                    New-Item -ItemType Directory -Path $parentDir -Force | Out-Null
+                    Write-Host "[PATH] Created directory for $($pathEntry.Key): $parentDir" -ForegroundColor Gray
+                }
+                catch {
+                    Write-Host "[PATH] ERROR: Cannot create directory for $($pathEntry.Key): $parentDir" -ForegroundColor Red
+                    if (-not $Force) {
+                        Write-Host "[PATH] Use -Force to continue anyway, or fix the path." -ForegroundColor Yellow
+                        exit 1
+                    }
+                }
+            }
         }
     }
     #endregion
@@ -980,7 +1461,7 @@ begin {
         )
         
         $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-        $logEntry = "[$timestamp] [$Level] $Message"
+        $logEntry = "[$timestamp] [$Level] [$script:RunId] $Message"
         
         # Write to log file if specified
         if ($LogPath) {
@@ -995,31 +1476,31 @@ begin {
         # Console output
         if (-not $Quiet) {
             switch ($Level) {
-                'ERROR'   { Write-Host $logEntry -ForegroundColor Red }
+                'ERROR' { Write-Host $logEntry -ForegroundColor Red }
                 'WARNING' { Write-Host $logEntry -ForegroundColor Yellow }
                 'SUCCESS' { Write-Host $logEntry -ForegroundColor Green }
                 'VERBOSE' { Write-Verbose $Message }
-                default   { Write-Host $logEntry }
+                default { Write-Host $logEntry }
             }
         }
     }
 
     function Write-DPHeader {
         if (-not $Quiet) {
-            Write-Host "`n" + ('=' * 80) -ForegroundColor Cyan
-            Write-Host " Delprof2-PS v$script:Version - User Profile Management Tool" -ForegroundColor Cyan
+            Write-Host -Object ("`n" + ('=' * 80)) -ForegroundColor Cyan
+            Write-Host -Object " Delprof2-PS v$script:Version - User Profile Management Tool" -ForegroundColor Cyan
             $modeText = if ($Preview) { 'PREVIEW/SIMULATION' } elseif ($Delete) { 'DELETE' } else { 'LIST/ANALYZE' }
             $modeColor = if ($Preview) { 'Magenta' } elseif ($Delete) { 'Red' } else { 'Green' }
             Write-Host " Mode: $modeText" -ForegroundColor $modeColor
             Write-Host " Criteria: Profiles older than $DaysInactive days" -ForegroundColor Cyan
-            Write-Host ('=' * 80) + "`n" -ForegroundColor Cyan
+            Write-Host -Object (('=' * 80) + "`n") -ForegroundColor Cyan
         }
         Write-DPLog -Message "Script started. Version: $script:Version, Delete mode: $Delete, Days inactive: $DaysInactive" -Level 'INFO'
     }
     #endregion
 
     #region Utility Functions
-    function Test-AdminRights {
+    function Test-AdminRight {
         $currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
         return $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     }
@@ -1095,7 +1576,7 @@ begin {
             $folderPath = Join-Path $ProfilePath $folder
             if (Test-Path $folderPath) {
                 $size = Get-ProfileFolderSize -Path $folderPath
-                $breakdown[$folder] = Format-Bytes -Bytes $size
+                $breakdown[$folder] = Format-Byte -Bytes $size
             }
             else {
                 $breakdown[$folder] = 'N/A'
@@ -1105,7 +1586,7 @@ begin {
         return $breakdown
     }
 
-    function Test-ProfileLockedFiles {
+    function Test-ProfileLockedFile {
         param([string]$ProfilePath)
         
         $lockedFiles = @()
@@ -1127,7 +1608,7 @@ begin {
         return $lockedFiles
     }
 
-    function Format-Bytes {
+    function Format-Byte {
         param([long]$Bytes)
         
         if ($Bytes -lt 0) { return 'Error' }
@@ -1476,7 +1957,7 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
     #endregion
 
     #region Profile Analysis Functions
-    function Get-ActiveSessions {
+    function Get-ActiveSession {
         param([string]$ComputerName)
         
         try {
@@ -1497,7 +1978,7 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
             
             # Method 2: Get logged on users via WMI
             try {
-                $loggedOn = Get-WmiObject -Class Win32_LoggedOnUser -ComputerName $ComputerName -ErrorAction SilentlyContinue |
+                $loggedOn = Get-WmiObject -Class Win32_LoggedOnUser -ComputerName $ComputerName -ErrorAction SilentlyContinue @script:CredentialSplat |
                     ForEach-Object { 
                         $_.Antecedent -match 'Domain="([^"]+)",Name="([^"]+)"' | Out-Null
                         "$($matches[1])\$($matches[2])"
@@ -1586,7 +2067,9 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
                         # Try to find timestamp in various registry values
                         if ($profileInfo.LocalProfileLoadTimeHigh) {
                             # Convert FILETIME if available
-                            $lastUsed = [DateTime]::FromFileTime($profileInfo.LocalProfileLoadTimeLow + ($profileInfo.LocalProfileLoadTimeHigh -shl 32))
+                            $ftLow = [uint32]$profileInfo.LocalProfileLoadTimeLow
+                            $ftHigh = [uint32]$profileInfo.LocalProfileLoadTimeHigh
+                            $lastUsed = [DateTime]::FromFileTime([long]$ftLow + ([long]$ftHigh -shl 32))
                             $source = 'RegistryLoadTime'
                         }
                         else {
@@ -1751,7 +2234,7 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
         
         # Execute chosen action
         switch ($choice) {
-            'R' {  # Remove registry key or Recreate NTUSER.DAT
+            'R' { # Remove registry key or Recreate NTUSER.DAT
                 if ($CorruptionType -eq 'Corrupted (Path Missing)') {
                     # Remove orphaned registry key
                     $targetDesc = "Remove orphaned registry key for $UserName ($SID)"
@@ -1771,7 +2254,7 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
                                         Remove-Item -Path "$regPath\$sid" -Recurse -Force
                                     }
                                 }
-                                Invoke-Command -ComputerName $ComputerName -ScriptBlock $scriptBlock -ArgumentList $SID
+                                Invoke-Command -ComputerName $ComputerName -ScriptBlock $scriptBlock -ArgumentList $SID @script:CredentialSplat
                             }
                             $fixed = $true
                             $actionTaken = 'Removed orphaned registry key'
@@ -1817,7 +2300,7 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
                 }
             }
             
-            'D' {  # Delete entire profile
+            'D' { # Delete entire profile
                 $targetDesc = "Delete entire corrupted profile for $UserName ($SID) at $ProfilePath"
                 if ($PSCmdlet.ShouldProcess($targetDesc, 'Delete Corrupted Profile')) {
                     try {
@@ -1842,7 +2325,7 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
                                     Remove-Item -Path $profilePath -Recurse -Force
                                 }
                             }
-                            Invoke-Command -ComputerName $ComputerName -ScriptBlock $scriptBlock -ArgumentList $SID, $ProfilePath
+                            Invoke-Command -ComputerName $ComputerName -ScriptBlock $scriptBlock -ArgumentList $SID, $ProfilePath @script:CredentialSplat
                         }
                         $fixed = $true
                         $actionTaken = 'Deleted entire corrupted profile'
@@ -1855,7 +2338,7 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
                 }
             }
             
-            'F' {  # Force-remove folder only
+            'F' { # Force-remove folder only
                 $targetDesc = "Remove profile folder for $UserName at $ProfilePath"
                 if ($PSCmdlet.ShouldProcess($targetDesc, 'Remove Folder')) {
                     try {
@@ -1876,7 +2359,7 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
                                     Remove-Item -Path $profilePath -Recurse -Force
                                 }
                             }
-                            Invoke-Command -ComputerName $ComputerName -ScriptBlock $scriptBlock -ArgumentList $ProfilePath
+                            Invoke-Command -ComputerName $ComputerName -ScriptBlock $scriptBlock -ArgumentList $ProfilePath @script:CredentialSplat
                         }
                         $fixed = $true
                         $actionTaken = 'Removed profile folder only'
@@ -1889,13 +2372,16 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
                 }
             }
             
-            'S' {  # Skip
+            'S' { # Skip
                 $actionTaken = 'Skipped by administrator'
                 if (-not $Quiet) {
                     Write-Host "  Skipped corruption repair for $UserName" -ForegroundColor Yellow
                 }
             }
         }
+        
+        # Audit log entry for corruption repair actions
+        Write-EventLogEntry -Message "Corruption repair on $ComputerName for '$UserName' ($SID): Choice=$choice, Action=$actionTaken, Fixed=$fixed" -EntryType Information -EventId 1012
         
         return [PSCustomObject]@{
             Fixed = $fixed
@@ -1906,7 +2392,7 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
     #endregion
 
     #region Core Profile Functions
-    function Get-UserProfiles {
+    function Get-UserProfile {
         param([string]$ComputerName)
         
         Write-DPLog -Message "Scanning profiles on $ComputerName..." -Level 'INFO'
@@ -1918,14 +2404,16 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
             
             if ($ComputerName -ne $env:COMPUTERNAME -and $ComputerName -ne 'localhost' -and $ComputerName -ne '.') {
                 # Use WMI for remote registry
-                $profileKeys = Get-WmiObject -ComputerName $ComputerName -Class StdRegProv -Namespace 'root\default' -ErrorAction Stop |
+                $profileKeys = Get-WmiObject -ComputerName $ComputerName -Class StdRegProv -Namespace 'root\default' -ErrorAction Stop @script:CredentialSplat |
                     ForEach-Object { $_.EnumKey(2147483650, 'SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList') } |
                     Select-Object -ExpandProperty sNames |
                     Where-Object { $_ -match '^S-1-5-21' }
                 
+                # Cache WMI connection outside loop to avoid reconnecting per-SID
+                $regProv = Get-WmiObject -ComputerName $ComputerName -Class StdRegProv -Namespace 'root\default' -ErrorAction Stop @script:CredentialSplat
+                
                 foreach ($sid in $profileKeys) {
                     try {
-                        $regProv = Get-WmiObject -ComputerName $ComputerName -Class StdRegProv -Namespace 'root\default'
                         $profilePathValue = $regProv.GetStringValue(2147483650, "SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid", 'ProfileImagePath')
                         $roamingValue = $regProv.GetDWORDValue(2147483650, "SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid", 'RoamingConfigured')
                         $tempValue = $regProv.GetDWORDValue(2147483650, "SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid", 'TemporaryProfile')
@@ -1982,7 +2470,7 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
             [string]$SID,
             [string]$ProfilePath,
             [long]$ProfileSize,
-            [string]$ProfileType
+            [string]$ActualProfileType
         )
         
         # Include filter
@@ -2005,12 +2493,9 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
         if ($MinProfileSizeMB -and $ProfileSize -lt ($MinProfileSizeMB * 1MB)) { return $false }
         if ($MaxProfileSizeMB -and $ProfileSize -gt ($MaxProfileSizeMB * 1MB)) { return $false }
         
-        # Profile type filter
+        # Profile type filter (compare script-level filter against actual profile type)
         if ($ProfileType -ne 'All') {
-            if ($ProfileType -eq 'Local' -and $ProfileType -ne 'Local') { return $false }
-            if ($ProfileType -eq 'Roaming' -and $ProfileType -ne 'Roaming') { return $false }
-            if ($ProfileType -eq 'Temporary' -and $ProfileType -ne 'Temporary') { return $false }
-            if ($ProfileType -eq 'Mandatory' -and $ProfileType -ne 'Mandatory') { return $false }
+            if ($ActualProfileType -notlike "$ProfileType*") { return $false }
         }
         
         return $true
@@ -2047,6 +2532,7 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
     }
 
     function Remove-ProfileWithRetry {
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal helper called from ShouldProcess-guarded callers')]
         param(
             [string]$ProfilePath,
             [string]$SID,
@@ -2081,7 +2567,7 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
                             ForEach-Object { $_.Attributes = $_.Attributes -band -bnot [System.IO.FileAttributes]::ReadOnly }
                         Remove-Item -Path $Path -Recurse -Force -ErrorAction Stop
                     }
-                    Invoke-Command -ComputerName $ComputerName -ScriptBlock $scriptBlock -ArgumentList $ProfilePath -ErrorAction Stop
+                    Invoke-Command -ComputerName $ComputerName -ScriptBlock $scriptBlock -ArgumentList $ProfilePath -ErrorAction Stop @script:CredentialSplat
                 }
                 
                 $success = $true
@@ -2131,7 +2617,7 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
                             Remove-Item -Path "$regPath\$sid" -Recurse -Force
                         }
                     }
-                    Invoke-Command -ComputerName $ComputerName -ScriptBlock $scriptBlock -ArgumentList $SID
+                    Invoke-Command -ComputerName $ComputerName -ScriptBlock $scriptBlock -ArgumentList $SID @script:CredentialSplat
                 }
                 
                 Write-DPLog -Message "Registry key removed for $UserName" -Level 'SUCCESS'
@@ -2174,12 +2660,12 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
         # Get active sessions
         $activeSessions = @()
         if (-not $IgnoreActiveSessions) {
-            $activeSessions = Get-ActiveSessions -ComputerName $ComputerName
+            $activeSessions = Get-ActiveSession -ComputerName $ComputerName
             Write-DPLog -Message "Active sessions on $ComputerName`: $($activeSessions -join ', ')" -Level 'VERBOSE'
         }
         
         # Get profiles
-        $profiles = Get-UserProfiles -ComputerName $ComputerName
+        $profiles = Get-UserProfile -ComputerName $ComputerName
         if ($null -eq $profiles) {
             return
         }
@@ -2261,7 +2747,7 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
             $ageSource = $ageInfo.Source
             
             # Calculate age in days
-            $ageInDays = if ($lastUsed -eq [DateTime]::MinValue) { -1 } else { [math]::Floor((Get-Date) - $lastUsed).TotalDays }
+            $ageInDays = if ($lastUsed -eq [DateTime]::MinValue) { -1 } else { [math]::Floor(((Get-Date) - $lastUsed).TotalDays) }
             
             # Check age criteria
             if ($ageInDays -lt $DaysInactive -and $ageInDays -ge 0) {
@@ -2269,12 +2755,14 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
                 continue
             }
             
-            # Get profile size
-            $sizeBytes = Get-ProfileFolderSize -Path $profilePath
-            $sizeFormatted = Format-Bytes -Bytes $sizeBytes
+            # Get profile size (only calculate when needed for display or filtering)
+            $sizeBytes = if ($ShowSpace -or $MinProfileSizeMB -or $MaxProfileSizeMB -or $Detailed) {
+                Get-ProfileFolderSize -Path $profilePath
+            } else { 0 }
+            $sizeFormatted = Format-Byte -Bytes $sizeBytes
             
             # Apply filters
-            $passesFilter = Test-ProfileFilter -UserName $userName -SID $sid -ProfilePath $profilePath -ProfileSize $sizeBytes -ProfileType $profType
+            $passesFilter = Test-ProfileFilter -UserName $userName -SID $sid -ProfilePath $profilePath -ProfileSize $sizeBytes -ActualProfileType $profType
             if (-not $passesFilter) {
                 Write-DPLog -Message "Profile $userName filtered out" -Level 'VERBOSE'
                 continue
@@ -2296,21 +2784,21 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
             
             # Build result object
             $result = [PSCustomObject]@{
-                ComputerName    = $ComputerName
-                UserName        = $userName.Split('\')[-1]
-                Domain          = if ($userName -contains '\') { $userName.Split('\')[0] } else { $env:USERDOMAIN }
-                SID             = $sid
-                ProfilePath     = $profilePath
-                ProfileType     = $profType
-                LastUsed        = if ($lastUsed -eq [DateTime]::MinValue) { 'Unknown' } else { $lastUsed.ToString('yyyy-MM-dd HH:mm:ss') }
-                AgeInDays       = $ageInDays
-                AgeSource       = $ageSource
-                SizeBytes       = $sizeBytes
-                SizeFormatted   = $sizeFormatted
+                ComputerName = $ComputerName
+                UserName = $userName.Split('\')[-1]
+                Domain = if ($userName -contains '\') { $userName.Split('\')[0] } else { $env:USERDOMAIN }
+                SID = $sid
+                ProfilePath = $profilePath
+                ProfileType = $profType
+                LastUsed = if ($lastUsed -eq [DateTime]::MinValue) { 'Unknown' } else { $lastUsed.ToString('yyyy-MM-dd HH:mm:ss') }
+                AgeInDays = $ageInDays
+                AgeSource = $ageSource
+                SizeBytes = $sizeBytes
+                SizeFormatted = $sizeFormatted
                 IsActiveSession = $hasActiveSession
                 EligibleForDeletion = $true
-                Deleted         = $false
-                Error           = $null
+                Deleted = $false
+                Error = $null
             }
             
             # Display info
@@ -2371,21 +2859,21 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
         if (-not $Quiet) {
             $duration = (Get-Date) - $script:StartTime
             
-            Write-Host "`n" + ('=' * 80) -ForegroundColor Cyan
-            Write-Host " SUMMARY" -ForegroundColor Cyan
-            Write-Host ('=' * 80) -ForegroundColor Cyan
+            Write-Host -Object ("`n" + ('=' * 80)) -ForegroundColor Cyan
+            Write-Host -Object " SUMMARY" -ForegroundColor Cyan
+            Write-Host -Object ('=' * 80) -ForegroundColor Cyan
             Write-Host " Computers processed: $($ComputerName.Count)"
             Write-Host " Profiles processed:  $script:TotalProfilesProcessed"
             if ($Delete) {
                 Write-Host " Profiles deleted:    $script:TotalProfilesDeleted" -ForegroundColor $(if ($script:TotalProfilesDeleted -gt 0) { 'Green' } else { 'White' })
-                Write-Host " Space freed:         $(Format-Bytes -Bytes $script:TotalSpaceFreed)" -ForegroundColor $(if ($script:TotalSpaceFreed -gt 0) { 'Green' } else { 'White' })
+                Write-Host " Space freed:         $(Format-Byte -Bytes $script:TotalSpaceFreed)" -ForegroundColor $(if ($script:TotalSpaceFreed -gt 0) { 'Green' } else { 'White' })
             }
             else {
                 # Dry run preview - show what WOULD be deleted
                 $wouldDelete = $script:Results | Where-Object { $_.EligibleForDeletion -and -not $_.IsActiveSession }
                 $wouldDeleteCount = $wouldDelete.Count
                 $wouldDeleteSize = ($wouldDelete | Measure-Object -Property SizeBytes -Sum).Sum
-                Write-Host " Would delete:        $wouldDeleteCount profiles ($(Format-Bytes -Bytes $wouldDeleteSize))" -ForegroundColor Yellow
+                Write-Host " Would delete:        $wouldDeleteCount profiles ($(Format-Byte -Bytes $wouldDeleteSize))" -ForegroundColor Yellow
             }
             Write-Host " Duration:            $($duration.ToString('hh\:mm\:ss'))"
             
@@ -2412,7 +2900,7 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
                 
                 foreach ($group in $ageGroups) {
                     $groupSize = ($group.Group | Measure-Object -Property SizeBytes -Sum).Sum
-                    Write-Host "  $($group.Name): $($group.Count) profiles ($(Format-Bytes -Bytes $groupSize))"
+                    Write-Host "  $($group.Name): $($group.Count) profiles ($(Format-Byte -Bytes $groupSize))"
                 }
             }
             
@@ -2420,17 +2908,6 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
         }
         
         Write-DPLog -Message "Script completed. Processed: $script:TotalProfilesProcessed, Deleted: $script:TotalProfilesDeleted" -Level 'INFO'
-        
-        # Export to CSV if requested
-        if ($OutputPath -and $script:Results.Count -gt 0) {
-            try {
-                $script:Results | Export-Csv -Path $OutputPath -NoTypeInformation -Force
-                Write-DPLog -Message "Results exported to $OutputPath" -Level 'SUCCESS'
-            }
-            catch {
-                Write-DPLog -Message "Failed to export to CSV`: $($_.Exception.Message)" -Level 'ERROR'
-            }
-        }
     }
     #endregion
 
@@ -2449,7 +2926,7 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
             if ($result.Success) {
                 Write-Host " OK" -ForegroundColor Green
                 try {
-                    $profiles = Get-UserProfiles -ComputerName $computer.Trim()
+                    $profiles = Get-UserProfile -ComputerName $computer.Trim()
                     Write-Host "  Found $($profiles.Count) profiles" -ForegroundColor Gray
                 }
                 catch {
@@ -2466,15 +2943,15 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
     
     # Preview mode banner
     if ($Preview) {
-        Write-Host "`n╔════════════════════════════════════════════════════════════════════════╗" -ForegroundColor Magenta
-        Write-Host "║                        PREVIEW/SIMULATION MODE                         ║" -ForegroundColor Magenta
-        Write-Host "║          No profiles will be deleted - showing what WOULD happen       ║" -ForegroundColor Magenta
-        Write-Host "╚════════════════════════════════════════════════════════════════════════╝" -ForegroundColor Magenta
+        Write-Host "`n==================================================================================================================================================—" -ForegroundColor Magenta
+        Write-Host "=                        PREVIEW/SIMULATION MODE                         =" -ForegroundColor Magenta
+        Write-Host "=          No profiles will be deleted - showing what WOULD happen       =" -ForegroundColor Magenta
+        Write-Host "====================================================================================================================================================" -ForegroundColor Magenta
     }
     
     # Validate admin rights for local execution
     if ($ComputerName -contains $env:COMPUTERNAME -or $ComputerName -contains 'localhost' -or $ComputerName -contains '.') {
-        if (-not (Test-AdminRights)) {
+        if (-not (Test-AdminRight)) {
             Write-DPLog -Message "Administrator privileges required for local execution. Restart as admin." -Level 'ERROR'
             Write-EventLogEntry -Message "Failed to start - admin rights required" -EntryType Error -EventId 1005
             exit 1
@@ -2596,7 +3073,7 @@ process {
         $computerCount = $ComputerName.Count
         for ($i = 0; $i -lt $computerCount; $i++) {
             $percentComplete = [math]::Floor(($i / $computerCount) * 100)
-            Write-Progress -Activity "Processing Computers" -Status "Processing $($ComputerName[$i]) ($($i+1) of $computerCount)" -PercentComplete $percentComplete
+            Write-Progress -Activity "Processing Computers" -Status "Processing $($ComputerName[$i]) - $($i + 1) of $computerCount" -PercentComplete $percentComplete
             Invoke-ComputerProcessing -ComputerName $ComputerName[$i].Trim()
         }
         Write-Progress -Activity "Processing Computers" -Completed
@@ -2608,10 +3085,10 @@ end {
     
     # Preview mode completion message
     if ($Preview) {
-        Write-Host "`n╔════════════════════════════════════════════════════════════════════════╗" -ForegroundColor Magenta
-        Write-Host "║                    PREVIEW MODE COMPLETE                               ║" -ForegroundColor Magenta
-        Write-Host "║        No profiles were deleted. Use -Delete to perform deletion.      ║" -ForegroundColor Magenta
-        Write-Host "╚════════════════════════════════════════════════════════════════════════╝" -ForegroundColor Magenta
+        Write-Host "`n==================================================================================================================================================" -ForegroundColor Magenta
+        Write-Host "=                    PREVIEW MODE COMPLETE                               =" -ForegroundColor Magenta
+        Write-Host "=        No profiles were deleted. Use -Delete to perform deletion.      =" -ForegroundColor Magenta
+        Write-Host "====================================================================================================================================================" -ForegroundColor Magenta
     }
     
     # Generate HTML report if requested
@@ -2620,7 +3097,7 @@ end {
             Computers = $ComputerName.Count
             ProfilesProcessed = $script:TotalProfilesProcessed
             ProfilesDeleted = $script:TotalProfilesDeleted
-            SpaceFreed = Format-Bytes -Bytes $script:TotalSpaceFreed
+            SpaceFreed = Format-Byte -Bytes $script:TotalSpaceFreed
             Duration = ((Get-Date) - $script:StartTime).ToString('hh\:mm\:ss')
         }
         Export-HtmlReport -Path $HtmlReport -Results $script:Results -Summary $summary
@@ -2632,14 +3109,14 @@ end {
             Computers = $ComputerName.Count
             ProfilesProcessed = $script:TotalProfilesProcessed
             ProfilesDeleted = $script:TotalProfilesDeleted
-            SpaceFreed = Format-Bytes -Bytes $script:TotalSpaceFreed
+            SpaceFreed = Format-Byte -Bytes $script:TotalSpaceFreed
             Duration = ((Get-Date) - $script:StartTime).ToString('hh\:mm\:ss')
         }
         Send-NotificationEmail -Summary $summary
     }
     
     # Log completion to event log
-    Write-EventLogEntry -Message "Delprof2-PS completed. Processed: $script:TotalProfilesProcessed, Deleted: $script:TotalProfilesDeleted, Space freed: $(Format-Bytes -Bytes $script:TotalSpaceFreed)" -EntryType Information -EventId 1002
+    Write-EventLogEntry -Message "Delprof2-PS completed. Processed: $script:TotalProfilesProcessed, Deleted: $script:TotalProfilesDeleted, Space freed: $(Format-Byte -Bytes $script:TotalSpaceFreed)" -EntryType Information -EventId 1002
     
     # Export to CSV if requested
     if ($OutputPath -and $script:Results.Count -gt 0) {
@@ -2652,6 +3129,19 @@ end {
         }
     }
     
+    # Security - Log Integrity Hash
+    if ($LogPath -and (Test-Path $LogPath)) {
+        try {
+            $logHash = (Get-FileHash -Path $LogPath -Algorithm SHA256).Hash
+            $hashEntry = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [INTEGRITY] Log SHA256: $logHash"
+            Add-Content -Path $LogPath -Value $hashEntry
+            Write-DPLog -Message "Log integrity hash appended to $LogPath" -Level 'VERBOSE'
+        }
+        catch {
+            # Silent fail - integrity hashing is supplementary
+        }
+    }
+
     # Return results for pipeline
     if ($script:Results.Count -gt 0) {
         return $script:Results

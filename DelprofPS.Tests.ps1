@@ -79,19 +79,19 @@ function Write-TestLog {
 
     $timestamp = Get-Date -Format 'HH:mm:ss'
     $colorMap = @{
-        'INFO'    = 'White'
-        'PASS'    = 'Green'
-        'FAIL'    = 'Red'
-        'WARN'    = 'Yellow'
+        'INFO' = 'White'
+        'PASS' = 'Green'
+        'FAIL' = 'Red'
+        'WARN' = 'Yellow'
         'SECTION' = 'Cyan'
     }
 
     $prefix = switch ($Level) {
-        'PASS'    { '[✓]' }
-        'FAIL'    { '[✗]' }
-        'WARN'    { '[!]' }
+        'PASS' { '[✓]' }
+        'FAIL' { '[✗]' }
+        'WARN' { '[!]' }
         'SECTION' { '▶' }
-        default   { '[i]' }
+        default { '[i]' }
     }
 
     Write-Host "$prefix [$timestamp] $Message" -ForegroundColor $colorMap[$Level]
@@ -127,11 +127,11 @@ function Add-TestResult {
     )
 
     $script:TestResults.Add([PSCustomObject]@{
-        TestName     = $TestName
-        Passed       = $Passed
-        Details      = $Details
+        TestName = $TestName
+        Passed = $Passed
+        Details = $Details
         ErrorMessage = $ErrorMessage
-        Duration     = $null
+        Duration = $null
     })
 }
 
@@ -147,13 +147,22 @@ function Add-TestResult {
     [bool] Returns $true if running as administrator, $false otherwise.
 
 .EXAMPLE
-    if (-not (Test-AdminRights)) {
+    if (-not (Test-AdminRight)) {
         Write-Error "This script requires administrator privileges."
     }
 #>
-function Test-AdminRights {
+function Test-AdminRight {
     $currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
     return $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+# Source DelprofPS.ps1 functions into script scope for use by all tests
+# The -Test flag causes exit 0 after the begin block, which we catch.
+# All functions defined in the begin block remain available.
+try {
+    . $PSScriptRoot\DelprofPS.ps1 -Test 2>&1 | Out-Null
+} catch {
+    # Expected: -Test mode calls exit which throws when dot-sourced
 }
 #endregion
 
@@ -181,6 +190,8 @@ function Test-AdminRights {
     Creates a test user with a 60-day-old profile containing ~100MB of data.
 #>
 function New-TestUser {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingConvertToSecureStringWithPlainText', '', Justification = 'Test user creation requires plaintext password')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Test helper function')]
     param(
         [string]$UserName,
         [int]$DaysOld = 30,
@@ -192,7 +203,7 @@ function New-TestUser {
         $existing = Get-LocalUser -Name $UserName -ErrorAction SilentlyContinue
         if ($existing) {
             Write-TestLog "User $UserName already exists, removing..." 'WARN'
-            Remove-LocalUser -Name $UserName -Force -ErrorAction SilentlyContinue
+            Remove-LocalUser -Name $UserName -ErrorAction SilentlyContinue
         }
 
         # Create local user with random password
@@ -236,15 +247,29 @@ function New-TestUser {
             $_.LastWriteTime = $oldDate
             $_.LastAccessTime = $oldDate
         }
+        # Also set the profile directory itself
+        $profileDir = Get-Item -Path $profilePath -Force
+        $profileDir.CreationTime = $oldDate
+        $profileDir.LastWriteTime = $oldDate
+        $profileDir.LastAccessTime = $oldDate
 
         # Set registry profile timestamps
         $profileListPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList"
         $userSid = (New-Object System.Security.Principal.NTAccount($UserName)).Translate([System.Security.Principal.SecurityIdentifier]).Value
         $userProfilePath = Join-Path $profileListPath $userSid
 
-        if (Test-Path $userProfilePath) {
-            [void](Get-Item $userProfilePath)
-            # Note: Modifying registry key timestamps requires P/Invoke, skipping for test
+        if (-not (Test-Path $userProfilePath)) {
+            New-Item -Path $userProfilePath -Force | Out-Null
+            New-ItemProperty -Path $userProfilePath -Name 'ProfileImagePath' -Value $profilePath -PropertyType ExpandString -Force | Out-Null
+            New-ItemProperty -Path $userProfilePath -Name 'Flags' -Value 0 -PropertyType DWord -Force | Out-Null
+            New-ItemProperty -Path $userProfilePath -Name 'State' -Value 0 -PropertyType DWord -Force | Out-Null
+            # Set LocalProfileLoadTime as FILETIME so Get-ProfileAge Registry method works
+            $fileTime = $oldDate.ToFileTime()
+            $ftBytes = [BitConverter]::GetBytes($fileTime)
+            $low = [BitConverter]::ToInt32($ftBytes, 0)
+            $high = [BitConverter]::ToInt32($ftBytes, 4)
+            New-ItemProperty -Path $userProfilePath -Name 'LocalProfileLoadTimeLow' -Value $low -PropertyType DWord -Force | Out-Null
+            New-ItemProperty -Path $userProfilePath -Name 'LocalProfileLoadTimeHigh' -Value $high -PropertyType DWord -Force | Out-Null
         }
 
         Write-TestLog "Created profile for $UserName (Age: $DaysOld days, Size: ${SizeMB}MB)" 'PASS'
@@ -272,7 +297,7 @@ function New-TestUser {
 function Initialize-TestEnvironment {
     Write-TestLog "Initializing test environment..." 'SECTION'
 
-    if (-not (Test-AdminRights)) {
+    if (-not (Test-AdminRight)) {
         Write-TestLog "Administrator privileges required!" 'FAIL'
         exit 1
     }
@@ -316,31 +341,37 @@ function Test-ProfileEnumeration {
     Write-TestLog "`nTEST: Profile Enumeration" 'SECTION'
 
     try {
-        # Source the main script functions
-        . $PSScriptRoot\DelprofPS.ps1 -Test
+        # Use Get-UserProfile from DelprofPS.ps1
+        $profiles = Get-UserProfile -ComputerName $env:COMPUTERNAME
 
-        # Test Get-UserProfiles equivalent
-        $profileListPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList"
-        $profiles = Get-ChildItem $profileListPath | Where-Object { $_.PSChildName -match '^S-1-5-21' }
+        if ($null -eq $profiles) {
+            Add-TestResult -TestName "Profile Enumeration - Get-UserProfile" -Passed $false -ErrorMessage "Get-UserProfile returned null"
+            Write-TestLog "Get-UserProfile returned null" 'FAIL'
+            return
+        }
 
-        $testProfiles = $profiles | ForEach-Object {
-            $props = Get-ItemProperty $_.PSPath
-            $userName = (New-Object System.Security.Principal.SecurityIdentifier($_.PSChildName)).Translate([System.Security.Principal.NTAccount]).Value
-            if ($userName -like '*DPTest_*') {
-                [PSCustomObject]@{
-                    SID = $_.PSChildName
+        Add-TestResult -TestName "Profile Enumeration - Get-UserProfile" -Passed $true -Details "Get-UserProfile returned $($profiles.Count) profiles"
+        Write-TestLog "Get-UserProfile found $($profiles.Count) total profiles" 'PASS'
+
+        # Use ConvertTo-UserName from DelprofPS.ps1 to resolve SIDs
+        $testProfiles = @()
+        foreach ($prof in $profiles) {
+            $userName = ConvertTo-UserName -SID $prof.SID
+            if ($userName -and $userName -like '*DPTest_*') {
+                $testProfiles += [PSCustomObject]@{
+                    SID = $prof.SID
                     UserName = $userName
-                    ProfilePath = $props.ProfileImagePath
+                    ProfilePath = $prof.ProfilePath
                 }
             }
         }
 
         if ($testProfiles.Count -eq $script:TestUsers.Count) {
-            Add-TestResult -TestName "Profile Enumeration" -Passed $true -Details "Found $($testProfiles.Count) test profiles"
+            Add-TestResult -TestName "Profile Enumeration - Test Users" -Passed $true -Details "Found $($testProfiles.Count) test profiles via ConvertTo-UserName"
             Write-TestLog "Found all $($testProfiles.Count) test profiles" 'PASS'
         }
         else {
-            Add-TestResult -TestName "Profile Enumeration" -Passed $false -Details "Expected $($script:TestUsers.Count), found $($testProfiles.Count)"
+            Add-TestResult -TestName "Profile Enumeration - Test Users" -Passed $false -Details "Expected $($script:TestUsers.Count), found $($testProfiles.Count)"
             Write-TestLog "Profile count mismatch" 'FAIL'
         }
     }
@@ -362,38 +393,31 @@ function Test-AgeCalculation {
             if (-not $oldUser) { continue }
 
             $profilePath = Join-Path $env:SystemDrive "Users\$($oldUser.Name)"
-            $ntuserDat = Join-Path $profilePath 'NTUSER.DAT'
 
-            $lastUsed = $null
-            switch ($method) {
-                'NTUSER_DAT' {
-                    if (Test-Path $ntuserDat) {
-                        $lastUsed = (Get-Item $ntuserDat).LastWriteTime
-                    }
-                }
-                'ProfilePath' {
-                    if (Test-Path $profilePath) {
-                        $lastUsed = (Get-Item $profilePath).LastWriteTime
-                    }
-                }
-                'Registry' {
-                    $lastUsed = (Get-Date).AddDays(-$oldUser.DaysOld)
-                }
-            }
+            # Resolve SID for this test user
+            $userSid = (New-Object System.Security.Principal.NTAccount($oldUser.Name)).Translate(
+                [System.Security.Principal.SecurityIdentifier]).Value
 
-            if ($lastUsed) {
-                $ageDays = [math]::Floor((Get-Date) - $lastUsed).TotalDays
+            # Use Get-ProfileAge from DelprofPS.ps1
+            $ageInfo = Get-ProfileAge -ProfilePath $profilePath -SID $userSid -Method $method -ComputerName $env:COMPUTERNAME
+
+            if ($ageInfo -and $ageInfo.LastUsed -and $ageInfo.LastUsed -ne [DateTime]::MinValue) {
+                $ageDays = [math]::Floor(((Get-Date) - $ageInfo.LastUsed).TotalDays)
                 $expectedAge = $oldUser.DaysOld
                 $variance = [math]::Abs($ageDays - $expectedAge)
 
                 if ($variance -le 1) {
-                    Add-TestResult -TestName "Age Calculation - $method" -Passed $true -Details "Age: $ageDays days (expected ~$expectedAge)"
-                    Write-TestLog "Age calculation ($method): $ageDays days" 'PASS'
+                    Add-TestResult -TestName "Age Calculation - $method" -Passed $true -Details "Age: $ageDays days via $($ageInfo.Source) (expected ~$expectedAge)"
+                    Write-TestLog "Age calculation ($method): $ageDays days (source: $($ageInfo.Source))" 'PASS'
                 }
                 else {
-                    Add-TestResult -TestName "Age Calculation - $method" -Passed $false -Details "Age: $ageDays, Expected: $expectedAge"
-                    Write-TestLog "Age variance too high for $method" 'WARN'
+                    Add-TestResult -TestName "Age Calculation - $method" -Passed $false -Details "Age: $ageDays, Expected: $expectedAge, Source: $($ageInfo.Source)"
+                    Write-TestLog "Age variance too high for $method ($ageDays vs $expectedAge)" 'WARN'
                 }
+            }
+            else {
+                Add-TestResult -TestName "Age Calculation - $method" -Passed $false -Details "Get-ProfileAge returned no valid date"
+                Write-TestLog "Get-ProfileAge returned no valid date for $method" 'FAIL'
             }
         }
         catch {
@@ -406,43 +430,103 @@ function Test-AgeCalculation {
 function Test-ProfileFiltering {
     Write-TestLog "`nTEST: Profile Filtering" 'SECTION'
 
-    $tests = @(
-        @{ Name = "Include Pattern"; Filter = "DPTest_Old*"; ExpectedCount = 2 }
-        @{ Name = "Exclude Pattern"; Filter = "*Service*"; ShouldExclude = $true }
-        @{ Name = "Age Filter"; MinDays = 100; ExpectedCount = 3 }
-    )
-
-    foreach ($test in $tests) {
-        try {
-            $profilePath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList"
-            $profiles = Get-ChildItem $profilePath | Where-Object { $_.PSChildName -match '^S-1-5-21' }
-
-            $testProfiles = @()
-            foreach ($prof in $profiles) {
-                try {
-                    $sid = $prof.PSChildName
-                    [void](Get-ItemProperty $prof.PSPath)
-                    $userName = (New-Object System.Security.Principal.SecurityIdentifier($sid)).Translate([System.Security.Principal.NTAccount]).Value
-
-                    if ($userName -like '*\DPTest_*') {
-                        $testProfiles += @{ UserName = $userName; SID = $sid }
-                    }
+    try {
+        # Get all test user profiles using Get-UserProfile from DelprofPS.ps1
+        $allProfiles = Get-UserProfile -ComputerName $env:COMPUTERNAME
+        $testProfileData = @()
+        foreach ($prof in $allProfiles) {
+            $userName = ConvertTo-UserName -SID $prof.SID
+            if ($userName -and $userName -like '*DPTest_*') {
+                $shortName = $userName.Split('\')[-1]
+                $size = Get-ProfileFolderSize -Path $prof.ProfilePath
+                $testProfileData += @{
+                    UserName = $shortName
+                    SID = $prof.SID
+                    ProfilePath = $prof.ProfilePath
+                    Size = $size
                 }
-                catch { }
             }
+        }
 
-            $result = $null
-            if ($test.Filter) {
-                $result = $testProfiles | Where-Object { $_.UserName -like $test.Filter }
+        # Save original filter values
+        $origInclude = $Include
+        $origExclude = $Exclude
+        $origMinSize = $MinProfileSizeMB
+        $origMaxSize = $MaxProfileSizeMB
+
+        # Test 1: Include filter - should match only DPTest_Old* users
+        try {
+            $script:Include = @('DPTest_Old*')
+            $script:Exclude = $null
+            $script:MinProfileSizeMB = 0
+            $script:MaxProfileSizeMB = 0
+            $matchCount = 0
+            foreach ($tp in $testProfileData) {
+                if (Test-ProfileFilter -UserName $tp.UserName -SID $tp.SID -ProfilePath $tp.ProfilePath -ProfileSize $tp.Size -ActualProfileType 'Local') {
+                    $matchCount++
+                }
             }
-
-            Add-TestResult -TestName "Filter - $($test.Name)" -Passed $true -Details "Filter applied successfully"
-            Write-TestLog "Filter test ($($test.Name)): Found $($result.Count) matches" 'PASS'
+            $passed = ($matchCount -eq 2)
+            Add-TestResult -TestName "Filter - Include Pattern" -Passed $passed -Details "Test-ProfileFilter matched $matchCount (expected 2)"
+            Write-TestLog "Filter test (Include Pattern): $matchCount matches via Test-ProfileFilter" $(if ($passed) { 'PASS' } else { 'FAIL' })
         }
         catch {
-            Add-TestResult -TestName "Filter - $($test.Name)" -Passed $false -ErrorMessage $_.Exception.Message
-            Write-TestLog "Filter test ($($test.Name)) failed: $_" 'FAIL'
+            Add-TestResult -TestName "Filter - Include Pattern" -Passed $false -ErrorMessage $_.Exception.Message
+            Write-TestLog "Filter test (Include Pattern) failed: $_" 'FAIL'
         }
+
+        # Test 2: Exclude filter - *Service* should be excluded
+        try {
+            $script:Include = $null
+            $script:Exclude = @('*Service*')
+            $script:MinProfileSizeMB = 0
+            $script:MaxProfileSizeMB = 0
+            $excludedCount = 0
+            foreach ($tp in $testProfileData) {
+                if (-not (Test-ProfileFilter -UserName $tp.UserName -SID $tp.SID -ProfilePath $tp.ProfilePath -ProfileSize $tp.Size -ActualProfileType 'Local')) {
+                    $excludedCount++
+                }
+            }
+            $passed = ($excludedCount -ge 1)
+            Add-TestResult -TestName "Filter - Exclude Pattern" -Passed $passed -Details "Test-ProfileFilter excluded $excludedCount profiles"
+            Write-TestLog "Filter test (Exclude Pattern): $excludedCount excluded via Test-ProfileFilter" $(if ($passed) { 'PASS' } else { 'FAIL' })
+        }
+        catch {
+            Add-TestResult -TestName "Filter - Exclude Pattern" -Passed $false -ErrorMessage $_.Exception.Message
+            Write-TestLog "Filter test (Exclude Pattern) failed: $_" 'FAIL'
+        }
+
+        # Test 3: Size filter - only profiles >= 100MB
+        try {
+            $script:Include = $null
+            $script:Exclude = $null
+            $script:MinProfileSizeMB = 100
+            $script:MaxProfileSizeMB = 0
+            $matchCount = 0
+            foreach ($tp in $testProfileData) {
+                if (Test-ProfileFilter -UserName $tp.UserName -SID $tp.SID -ProfilePath $tp.ProfilePath -ProfileSize $tp.Size -ActualProfileType 'Local') {
+                    $matchCount++
+                }
+            }
+            # Users with >= 100MB: OldUser1(150), MedUser1(200), MedUser2(120), AdminTest(500) = 4
+            $passed = ($matchCount -ge 3)
+            Add-TestResult -TestName "Filter - Size Filter" -Passed $passed -Details "Test-ProfileFilter matched $matchCount profiles >= 100MB"
+            Write-TestLog "Filter test (Size Filter): $matchCount matches via Test-ProfileFilter" $(if ($passed) { 'PASS' } else { 'FAIL' })
+        }
+        catch {
+            Add-TestResult -TestName "Filter - Size Filter" -Passed $false -ErrorMessage $_.Exception.Message
+            Write-TestLog "Filter test (Size Filter) failed: $_" 'FAIL'
+        }
+
+        # Restore original filter values
+        $script:Include = $origInclude
+        $script:Exclude = $origExclude
+        $script:MinProfileSizeMB = $origMinSize
+        $script:MaxProfileSizeMB = $origMaxSize
+    }
+    catch {
+        Add-TestResult -TestName "Filter - Setup" -Passed $false -ErrorMessage $_.Exception.Message
+        Write-TestLog "Profile filtering setup failed: $_" 'FAIL'
     }
 }
 
@@ -454,21 +538,29 @@ function Test-ProfileSizeCalculation {
         $profilePath = Join-Path $env:SystemDrive "Users\$($testUser.Name)"
 
         if (Test-Path $profilePath) {
-            $size = (Get-ChildItem -Path $profilePath -Recurse -Force -ErrorAction SilentlyContinue |
-                Measure-Object -Property Length -Sum).Sum
+            # Use Get-ProfileFolderSize from DelprofPS.ps1
+            $size = Get-ProfileFolderSize -Path $profilePath
 
             $sizeMB = [math]::Round($size / 1MB, 2)
             $expectedMB = $testUser.SizeMB
 
+            # Use Format-Byte from DelprofPS.ps1
+            $formatted = Format-Byte -Bytes $size
+
             # Allow variance for filesystem overhead
             if ($sizeMB -ge ($expectedMB * 0.8) -and $sizeMB -le ($expectedMB * 1.5)) {
-                Add-TestResult -TestName "Profile Size Calculation" -Passed $true -Details "Size: $sizeMB MB (expected ~$expectedMB MB)"
-                Write-TestLog "Size calculation: $sizeMB MB" 'PASS'
+                Add-TestResult -TestName "Profile Size - Get-ProfileFolderSize" -Passed $true -Details "Size: $formatted (expected ~$expectedMB MB)"
+                Write-TestLog "Get-ProfileFolderSize: $formatted" 'PASS'
             }
             else {
-                Add-TestResult -TestName "Profile Size Calculation" -Passed $false -Details "Size: $sizeMB MB, Expected: ~$expectedMB MB"
+                Add-TestResult -TestName "Profile Size - Get-ProfileFolderSize" -Passed $false -Details "Size: $formatted, Expected: ~$expectedMB MB"
                 Write-TestLog "Size outside expected range" 'WARN'
             }
+
+            # Verify Format-Byte output is well-formed
+            $fmtPassed = ($formatted -match '^[\d.]+ (B|KB|MB|GB|TB)$')
+            Add-TestResult -TestName "Profile Size - Format-Byte" -Passed $fmtPassed -Details "Format-Byte returned: $formatted"
+            Write-TestLog "Format-Byte output: $formatted" $(if ($fmtPassed) { 'PASS' } else { 'FAIL' })
         }
     }
     catch {
@@ -481,19 +573,27 @@ function Test-ProtectedProfileDetection {
     Write-TestLog "`nTEST: Protected Profile Detection" 'SECTION'
 
     try {
+        # Test system profile names via Test-IsProtectedProfile from DelprofPS.ps1
         $systemProfiles = @('Administrator', 'Guest', 'Default', 'Public')
-        $protectedSIDs = @('S-1-5-18', 'S-1-5-19', 'S-1-5-20')
-
         foreach ($prof in $systemProfiles) {
-            # These should be detected as protected
-            Add-TestResult -TestName "Protected Profile - $prof" -Passed $true -Details "System profile detected"
+            $isProtected = Test-IsProtectedProfile -UserName $prof -SID 'S-1-5-21-0-0-0-1234'
+            Add-TestResult -TestName "Protected Profile - $prof" -Passed $isProtected -Details "Test-IsProtectedProfile returned $isProtected"
+            Write-TestLog "Test-IsProtectedProfile('$prof'): $isProtected" $(if ($isProtected) { 'PASS' } else { 'FAIL' })
         }
 
+        # Test protected SIDs via Test-IsProtectedProfile from DelprofPS.ps1
+        $protectedSIDs = @('S-1-5-18', 'S-1-5-19', 'S-1-5-20')
         foreach ($sid in $protectedSIDs) {
-            Add-TestResult -TestName "Protected SID - $sid" -Passed $true -Details "Protected SID detected"
+            $isProtected = Test-IsProtectedProfile -UserName 'SomeUser' -SID $sid
+            Add-TestResult -TestName "Protected SID - $sid" -Passed $isProtected -Details "Test-IsProtectedProfile returned $isProtected"
+            Write-TestLog "Test-IsProtectedProfile(SID=$sid): $isProtected" $(if ($isProtected) { 'PASS' } else { 'FAIL' })
         }
 
-        Write-TestLog "Protected profile detection working" 'PASS'
+        # Test that a regular test user is NOT protected
+        $testUserName = ($script:TestUsers | Select-Object -First 1).Name
+        $isNotProtected = -not (Test-IsProtectedProfile -UserName $testUserName -SID 'S-1-5-21-0-0-0-9999')
+        Add-TestResult -TestName "Protected Profile - Test User Not Protected" -Passed $isNotProtected -Details "Test-IsProtectedProfile('$testUserName') = $(-not $isNotProtected)"
+        Write-TestLog "Test user '$testUserName' correctly not protected: $isNotProtected" $(if ($isNotProtected) { 'PASS' } else { 'FAIL' })
     }
     catch {
         Add-TestResult -TestName "Protected Profile Detection" -Passed $false -ErrorMessage $_.Exception.Message
@@ -535,29 +635,32 @@ function Test-BackupFunctionality {
     Write-TestLog "`nTEST: Profile Backup" 'SECTION'
 
     try {
-        $backupPath = Join-Path $TestPath 'Backups'
-        if (-not (Test-Path $backupPath)) {
-            New-Item -ItemType Directory -Path $backupPath -Force | Out-Null
-        }
-
+        $backupDir = Join-Path $TestPath 'Backups'
         $testUser = ($script:TestUsers | Select-Object -First 1).Name
         $profilePath = Join-Path $env:SystemDrive "Users\$testUser"
 
         if (Test-Path $profilePath) {
-            $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-            $backupFile = Join-Path $backupPath "${testUser}_$timestamp.zip"
+            # Set $BackupPath so Backup-Profile from DelprofPS.ps1 uses it
+            $script:BackupPath = $backupDir
 
-            Compress-Archive -Path $profilePath -DestinationPath $backupFile -CompressionLevel Optimal -Force
+            $result = Backup-Profile -SourcePath $profilePath -UserName $testUser
 
-            if (Test-Path $backupFile) {
-                $backupSize = (Get-Item $backupFile).Length
-                Add-TestResult -TestName "Profile Backup" -Passed $true -Details "Backup created: $([math]::Round($backupSize/1KB, 2)) KB"
-                Write-TestLog "Backup created: $backupFile" 'PASS'
+            # Find the created backup file
+            $backupFiles = Get-ChildItem -Path $backupDir -Filter "${testUser}_*.zip" -ErrorAction SilentlyContinue
+
+            if ($result -and $backupFiles) {
+                $backupSize = ($backupFiles | Select-Object -Last 1).Length
+                $formatted = Format-Byte -Bytes $backupSize
+                Add-TestResult -TestName "Profile Backup - Backup-Profile" -Passed $true -Details "Backup-Profile created: $formatted"
+                Write-TestLog "Backup-Profile created: $($backupFiles[-1].FullName)" 'PASS'
             }
             else {
-                Add-TestResult -TestName "Profile Backup" -Passed $false -Details "Backup file not found"
-                Write-TestLog "Backup file not created" 'FAIL'
+                Add-TestResult -TestName "Profile Backup - Backup-Profile" -Passed $false -Details "Backup-Profile returned $result, files found: $($backupFiles.Count)"
+                Write-TestLog "Backup-Profile did not create backup" 'FAIL'
             }
+
+            # Reset BackupPath
+            $script:BackupPath = $null
         }
     }
     catch {
@@ -607,38 +710,54 @@ function Test-HTMLReportGeneration {
     try {
         $htmlPath = Join-Path $TestPath 'TestReport.html'
 
-        # Create sample HTML report
-        $html = @"
-<!DOCTYPE html>
-<html>
-<head><title>Test Report</title></head>
-<body>
-    <h1>DelprofPS Test Report</h1>
-    <p>Generated: $(Get-Date)</p>
-    <table>
-        <tr><th>User</th><th>Age</th><th>Size</th></tr>
-        <tr><td>DPTest_OldUser1</td><td>200 days</td><td>150 MB</td></tr>
-        <tr><td>DPTest_NewUser1</td><td>15 days</td><td>50 MB</td></tr>
-    </table>
-</body>
-</html>
-"@
+        # Build sample results matching the format Invoke-ComputerProcessing produces
+        $sampleResults = @(
+            [PSCustomObject]@{
+                ComputerName = $env:COMPUTERNAME; UserName = 'DPTest_OldUser1'; Domain = $env:USERDOMAIN
+                SID = 'S-1-5-21-0-0-0-1001'; ProfilePath = 'C:\Users\DPTest_OldUser1'
+                ProfileType = 'Local'; LastUsed = (Get-Date).AddDays(-200).ToString('yyyy-MM-dd HH:mm:ss')
+                AgeInDays = 200; AgeSource = 'NTUSER.DAT'; SizeBytes = 157286400
+                SizeFormatted = '150 MB'; IsActiveSession = $false; EligibleForDeletion = $true
+                Deleted = $false; Error = $null
+            }
+            [PSCustomObject]@{
+                ComputerName = $env:COMPUTERNAME; UserName = 'DPTest_NewUser1'; Domain = $env:USERDOMAIN
+                SID = 'S-1-5-21-0-0-0-1002'; ProfilePath = 'C:\Users\DPTest_NewUser1'
+                ProfileType = 'Local'; LastUsed = (Get-Date).AddDays(-15).ToString('yyyy-MM-dd HH:mm:ss')
+                AgeInDays = 15; AgeSource = 'NTUSER.DAT'; SizeBytes = 52428800
+                SizeFormatted = '50 MB'; IsActiveSession = $false; EligibleForDeletion = $true
+                Deleted = $false; Error = $null
+            }
+        )
 
-        $html | Out-File -FilePath $htmlPath -Encoding UTF8 -Force
+        $summary = @{
+            Computers = 1
+            ProfilesProcessed = 2
+            ProfilesDeleted = 0
+            SpaceFreed = '0 B'
+            Duration = '00:00:05'
+        }
+
+        # Use Export-HtmlReport from DelprofPS.ps1
+        Export-HtmlReport -Path $htmlPath -Results $sampleResults -Summary $summary
 
         if (Test-Path $htmlPath) {
             $content = Get-Content $htmlPath -Raw
-            if ($content -match 'DelprofPS Test Report' -and $content -match '<table>') {
-                Add-TestResult -TestName "HTML Report Generation" -Passed $true -Details "HTML report created with proper structure"
-                Write-TestLog "HTML report generated" 'PASS'
+            $hasTitle = $content -match 'Delprof2-PS'
+            $hasTable = $content -match '<table'
+            $hasData = $content -match 'DPTest_OldUser1'
+
+            if ($hasTitle -and $hasTable -and $hasData) {
+                Add-TestResult -TestName "HTML Report - Export-HtmlReport" -Passed $true -Details "Export-HtmlReport created valid HTML report"
+                Write-TestLog "Export-HtmlReport generated valid report" 'PASS'
             }
             else {
-                Add-TestResult -TestName "HTML Report Generation" -Passed $false -Details "HTML structure invalid"
-                Write-TestLog "Invalid HTML structure" 'FAIL'
+                Add-TestResult -TestName "HTML Report - Export-HtmlReport" -Passed $false -Details "Missing: title=$hasTitle, table=$hasTable, data=$hasData"
+                Write-TestLog "Export-HtmlReport output incomplete" 'FAIL'
             }
         }
         else {
-            Add-TestResult -TestName "HTML Report Generation" -Passed $false -Details "HTML file not created"
+            Add-TestResult -TestName "HTML Report - Export-HtmlReport" -Passed $false -Details "Export-HtmlReport did not create file"
             Write-TestLog "HTML file not created" 'FAIL'
         }
     }
@@ -699,13 +818,14 @@ function Test-ProfileDeletion {
     Removes the specified test user and cleans up all associated data.
 #>
 function Remove-TestUser {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Test cleanup helper function')]
     param([string]$UserName)
 
     try {
         # Remove local user
         $user = Get-LocalUser -Name $UserName -ErrorAction SilentlyContinue
         if ($user) {
-            Remove-LocalUser -Name $UserName -Force -ErrorAction SilentlyContinue
+            Remove-LocalUser -Name $UserName -ErrorAction SilentlyContinue
             Write-TestLog "Removed test user: $UserName" 'PASS'
         }
 
@@ -806,7 +926,7 @@ function Clear-TestEnvironment {
     Displays the test summary report and exits with appropriate return code.
 #>
 function Show-TestSummary {
-    Write-TestLog "`n" + ('=' * 80) 'SECTION'
+    Write-TestLog ("`n" + ('=' * 80)) 'SECTION'
     Write-TestLog "TEST SUMMARY" 'SECTION'
     Write-TestLog ('=' * 80) 'SECTION'
 

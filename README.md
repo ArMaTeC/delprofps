@@ -45,7 +45,7 @@ Delprof2-PS is a feature-rich PowerShell script that **exceeds** the capabilitie
 | `-Preview` | Simulation mode with visual banners showing what WOULD be deleted |
 | `-UseParallel` | Parallel processing for multiple computers with throttling |
 | `-HtmlReport` | Generate professional HTML reports with CSS styling |
-| Event Log Integration | Windows Event Log entries for auditing (Event IDs 1000-1011) |
+| Event Log Integration | Windows Event Log entries for auditing (Event IDs 1000-1012) |
 | `-BackupPath` | ZIP compression backup before deletion |
 | `-ConfigFile` | JSON configuration file support |
 | Email Notifications | SMTP alerts for scheduled tasks |
@@ -67,10 +67,10 @@ Delprof2-PS is a feature-rich PowerShell script that **exceeds** the capabilitie
 
 ```powershell
 # Clone the repository
-git clone https://github.com/yourusername/Delprof2-PS.git
+git clone https://github.com/ArMaTeC/DelprofPS.git
 
 # Or download directly
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/yourusername/Delprof2-PS/main/DelprofPS.ps1" -OutFile "DelprofPS.ps1"
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/ArMaTeC/DelprofPS/main/DelprofPS.ps1" -OutFile "DelprofPS.ps1"
 ```
 
 1. (Optional) Create a configuration file - see `DelprofPS.config.json` example
@@ -156,6 +156,8 @@ Invoke-WebRequest -Uri "https://raw.githubusercontent.com/yourusername/Delprof2-
 | `EmailFrom` | Email sender | delprofps@computername |
 | `Detailed` | Show folder breakdown | False |
 | `Preview` | Simulation mode | False |
+| `VerifyIntegrity` | Verify script SHA256 hash before execution | False |
+| `Credential` | PSCredential for remote computer authentication | Current identity |
 
 ## Configuration File
 
@@ -199,6 +201,7 @@ Delprof2-PS includes multiple layers of protection:
 | 1005 | Error - admin rights required |
 | 1010 | Profile deleted |
 | 1011 | Profile deletion failed |
+| 1012 | Corruption repair action taken |
 
 ## Examples
 
@@ -389,7 +392,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Support
 
-For issues, questions, or feature requests, please [open an issue](https://github.com/yourusername/Delprof2-PS/issues).
+For issues, questions, or feature requests, please [open an issue](https://github.com/ArMaTeC/DelprofPS/issues).
 
 ---
 
