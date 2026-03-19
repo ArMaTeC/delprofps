@@ -21,8 +21,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:ProjectRoot = $PSScriptRoot
-$script:Version = (Import-PowerShellDataFile "$script:ProjectRoot\DelprofPS.psd1").ModuleVersion
+$script:ProjectRoot = Split-Path $PSScriptRoot -Parent
+$script:Version = (Import-PowerShellDataFile "$script:ProjectRoot\src\DelprofPS.psd1").ModuleVersion
 $script:ReleaseDir = Join-Path $script:ProjectRoot 'release'
 $script:PassedSteps = 0
 $script:FailedSteps = 0
@@ -48,8 +48,8 @@ function Invoke-Lint {
         Install-Module -Name PSScriptAnalyzer -Force -Scope CurrentUser
     }
 
-    $settingsPath = Join-Path $script:ProjectRoot 'PSScriptAnalyzerSettings.psd1'
-    $scripts = @('delprofPS.ps1', 'DelprofPS-GUI.ps1')
+    $settingsPath = Join-Path $script:ProjectRoot 'config\PSScriptAnalyzerSettings.psd1'
+    $scripts = @('delprofPS.ps1')
     $totalErrors = 0
 
     foreach ($scriptFile in $scripts) {
@@ -86,7 +86,7 @@ function Invoke-Test {
         Install-Module -Name Pester -Force -Scope CurrentUser -MinimumVersion 5.0
     }
 
-    $testFile = Join-Path $script:ProjectRoot 'DelprofPS.Pester.Tests.ps1'
+    $testFile = Join-Path $script:ProjectRoot 'tests\DelprofPS.Pester.Tests.ps1'
     if (Test-Path $testFile) {
         try {
             $config = New-PesterConfiguration
@@ -127,15 +127,15 @@ function Invoke-Package {
 
     $filesToInclude = @(
         'delprofPS.ps1',
-        'DelprofPS.psd1',
-        'DelprofPS.config.json',
-        'DelprofPS.Tests.ps1',
-        'DelprofPS.Pester.Tests.ps1',
-        'PSScriptAnalyzerSettings.psd1',
-        'README.md',
-        'CHANGELOG.md',
-        'CONTRIBUTING.md',
-        'LICENSE'
+        'src\DelprofPS.psd1',
+        'config\DelprofPS.config.json',
+        'tests\DelprofPS.Tests.ps1',
+        'tests\DelprofPS.Pester.Tests.ps1',
+        'config\PSScriptAnalyzerSettings.psd1',
+        'docs\README.md',
+        'docs\CHANGELOG.md',
+        'docs\CONTRIBUTING.md',
+        'docs\LICENSE'
     )
 
     $tempDir = Join-Path $env:TEMP "DelprofPS-Package-$(Get-Date -Format 'yyyyMMddHHmmss')"
@@ -151,10 +151,10 @@ function Invoke-Package {
         }
     }
 
-    # Include StartScripts folder
-    $startScriptsDir = Join-Path $script:ProjectRoot 'StartScripts'
-    if (Test-Path $startScriptsDir) {
-        Copy-Item -Path $startScriptsDir -Destination (Join-Path $tempDir 'StartScripts') -Recurse
+    # Include examples folder
+    $examplesDir = Join-Path $script:ProjectRoot 'examples'
+    if (Test-Path $examplesDir) {
+        Copy-Item -Path $examplesDir -Destination (Join-Path $tempDir 'examples') -Recurse
     }
 
     # Generate integrity hash
@@ -183,10 +183,10 @@ function Invoke-Hash {
     $mainScript = Join-Path $script:ProjectRoot 'delprofPS.ps1'
     if (Test-Path $mainScript) {
         $hash = (Get-FileHash -Path $mainScript -Algorithm SHA256).Hash
-        $hashFile = Join-Path $script:ProjectRoot 'DelprofPS.sha256'
+        $hashFile = Join-Path $script:ProjectRoot 'assets\DelprofPS.sha256'
         $hash | Out-File $hashFile -Encoding UTF8
         Write-BuildLog "SHA256: $hash" 'INFO'
-        Write-BuildLog "Hash written to DelprofPS.sha256" 'SUCCESS'
+        Write-BuildLog "Hash written to assets\DelprofPS.sha256" 'SUCCESS'
         $script:PassedSteps++
         return $true
     }

@@ -11,9 +11,9 @@
 #>
 
 BeforeAll {
-    $script:ScriptPath = Join-Path $PSScriptRoot 'delprofPS.ps1'
-    $script:ConfigPath = Join-Path $PSScriptRoot 'DelprofPS.config.json'
-    $script:ManifestPath = Join-Path $PSScriptRoot 'DelprofPS.psd1'
+    $script:ScriptPath = Join-Path $PSScriptRoot '..\delprofPS.ps1'
+    $script:ConfigPath = Join-Path $PSScriptRoot '..\config\DelprofPS.config.json'
+    $script:ManifestPath = Join-Path $PSScriptRoot '..\src\DelprofPS.psd1'
 }
 
 Describe 'DelprofPS Module Structure' {
@@ -31,19 +31,19 @@ Describe 'DelprofPS Module Structure' {
     }
 
     It 'README exists' {
-        Join-Path $PSScriptRoot 'README.md' | Should -Exist
+        Join-Path $PSScriptRoot '..\docs\README.md' | Should -Exist
     }
 
     It 'LICENSE exists' {
-        Join-Path $PSScriptRoot 'LICENSE' | Should -Exist
+        Join-Path $PSScriptRoot '..\docs\LICENSE' | Should -Exist
     }
 
     It 'CHANGELOG exists' {
-        Join-Path $PSScriptRoot 'CHANGELOG.md' | Should -Exist
+        Join-Path $PSScriptRoot '..\docs\CHANGELOG.md' | Should -Exist
     }
 
     It 'CONTRIBUTING exists' {
-        Join-Path $PSScriptRoot 'CONTRIBUTING.md' | Should -Exist
+        Join-Path $PSScriptRoot '..\docs\CONTRIBUTING.md' | Should -Exist
     }
 }
 

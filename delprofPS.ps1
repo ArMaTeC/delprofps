@@ -698,6 +698,23 @@ begin {
         $script:guiRunning = $false
         $script:guiStopRequested = $false
         
+        # Stop any stale timers from a previous GUI session in the same PS process
+        if ($script:activeRefreshTimer) {
+            try { $script:activeRefreshTimer.Stop() } catch {}
+            $script:activeRefreshTimer = $null
+        }
+        if ($script:activeRunTimer) {
+            try { $script:activeRunTimer.Stop() } catch {}
+            $script:activeRunTimer = $null
+        }
+        
+        # Initialise index counters defensively (prevents null-index if stale timer fires)
+        $script:refreshInfoIndex = 0
+        $script:lastOutputIndex = 0
+        $script:lastInfoIndex = 0
+        $script:lastWarningIndex = 0
+        $script:lastErrorIndex = 0
+        
         # Output function for GUI
         $script:WriteGuiOutput = {
             param([string]$Text, [string]$Color = "White")
@@ -721,129 +738,245 @@ begin {
         $script:profileList = [System.Collections.ObjectModel.ObservableCollection[PSObject]]::new()
         $controls['dgProfiles'].ItemsSource = $script:profileList
         
-        # Helper: Enumerate profiles on a computer
+        # Helper: Enumerate profiles on a computer (runs in background runspace)
         $script:RefreshProfileList = {
             param([string]$TargetComputer)
-            $script:profileList.Clear()
-            $controls['txtProfileCount'].Text = "Scanning..."
-            [System.Windows.Forms.Application]::DoEvents()
             
-            try {
+            # Disable the refresh button and show progress
+            $controls['btnRefreshProfiles'].IsEnabled = $false
+            $controls['txtProfileCount'].Text = "Scanning..."
+            $controls['progressBar'].Visibility = "Visible"
+            $controls['progressBar'].IsIndeterminate = $true
+            
+            $profileListRef = $script:profileList
+            $writeOutput = $script:WriteGuiOutput
+            $controlsRef = $controls
+            
+            # Clear existing items on the UI thread
+            $script:profileList.Clear()
+            
+            # Build a background runspace to scan without freezing the GUI
+            $runspace = [runspacefactory]::CreateRunspace()
+            $runspace.ApartmentState = 'STA'
+            $runspace.Open()
+            $runspace.SessionStateProxy.SetVariable('TargetComputer', $TargetComputer)
+            $runspace.SessionStateProxy.SetVariable('localComputerName', $env:COMPUTERNAME)
+            
+            $ps = [powershell]::Create().AddScript({
                 $profileListPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList"
-                $isLocal = ($TargetComputer -eq $env:COMPUTERNAME -or $TargetComputer -eq 'localhost' -or $TargetComputer -eq '.')
+                $isLocal = ($TargetComputer -eq $localComputerName -or $TargetComputer -eq 'localhost' -or $TargetComputer -eq '.')
+                $systemNames = @('Default', 'Default User', 'Public', 'SYSTEM', 'LocalService', 'NetworkService', 'systemprofile')
+                $results = [System.Collections.Generic.List[object]]::new()
+                $errorMessages = [System.Collections.Generic.List[string]]::new()
                 
-                # System/special profile names to flag
-                $systemNames = @('Default', 'Default User', 'Public', 'SYSTEM', 'LocalService', 'NetworkService', 'systemprofile', 'LocalService', 'NetworkService')
+                Write-Host "[Scan] Starting profile scan on $TargetComputer (local=$isLocal)..."
                 
-                if ($isLocal) {
-                    $profileKeys = Get-ChildItem $profileListPath -ErrorAction Stop | 
-                        Where-Object { $_.PSChildName -match '^S-1-5-21' }
-                    
-                    foreach ($key in $profileKeys) {
-                        try {
-                            $props = Get-ItemProperty $key.PSPath
-                            $sid = $key.PSChildName
-                            $profilePath = $props.ProfileImagePath
-                            
-                            # Resolve username
-                            $userName = $null
+                try {
+                    if ($isLocal) {
+                        Write-Host "[Scan] Reading local registry ProfileList..."
+                        $profileKeys = Get-ChildItem $profileListPath -ErrorAction Stop |
+                            Where-Object { $_.PSChildName -match '^S-1-5-21' }
+                        
+                        $totalKeys = @($profileKeys).Count
+                        Write-Host "[Scan] Found $totalKeys profile SIDs to process"
+                        $current = 0
+                        
+                        foreach ($key in $profileKeys) {
+                            $current++
                             try {
-                                $secId = New-Object System.Security.Principal.SecurityIdentifier($sid)
-                                $ntAccount = $secId.Translate([System.Security.Principal.NTAccount])
-                                $userName = $ntAccount.Value
-                            } catch {
-                                $userName = "(Unresolvable)"
-                            }
-                            
-                            # Get folder size and last modified
-                            $sizeMB = "N/A"
-                            $lastMod = "N/A"
-                            if ($profilePath -and (Test-Path $profilePath)) {
+                                $props = Get-ItemProperty $key.PSPath
+                                $sid = $key.PSChildName
+                                $profilePath = $props.ProfileImagePath
+                                
+                                Write-Host "[Scan] ($current/$totalKeys) Processing SID $sid..."
+                                
+                                $userName = $null
                                 try {
-                                    $dirInfo = Get-Item $profilePath -ErrorAction SilentlyContinue
-                                    $lastMod = $dirInfo.LastWriteTime.ToString("yyyy-MM-dd HH:mm")
-                                    $ntUserDat = Join-Path $profilePath "NTUSER.DAT"
-                                    if (Test-Path $ntUserDat) {
-                                        $lastMod = (Get-Item $ntUserDat -Force -ErrorAction SilentlyContinue).LastWriteTime.ToString("yyyy-MM-dd HH:mm")
-                                    }
-                                    $totalSize = (Get-ChildItem $profilePath -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
-                                    $sizeMB = [math]::Round($totalSize / 1MB, 1)
+                                    $secId = New-Object System.Security.Principal.SecurityIdentifier($sid)
+                                    $ntAccount = $secId.Translate([System.Security.Principal.NTAccount])
+                                    $userName = $ntAccount.Value
                                 } catch {
-                                    $sizeMB = "Error"
+                                    $userName = "(Unresolvable)"
+                                }
+                                
+                                Write-Host "[Scan]   User: $userName | Path: $profilePath"
+                                
+                                $sizeMB = "N/A"
+                                $lastMod = "N/A"
+                                if ($profilePath -and (Test-Path $profilePath)) {
+                                    Write-Host "[Scan]   Calculating folder size..."
+                                    try {
+                                        $dirInfo = Get-Item $profilePath -ErrorAction SilentlyContinue
+                                        $lastMod = $dirInfo.LastWriteTime.ToString("yyyy-MM-dd HH:mm")
+                                        $ntUserDat = Join-Path $profilePath "NTUSER.DAT"
+                                        if (Test-Path $ntUserDat) {
+                                            $lastMod = (Get-Item $ntUserDat -Force -ErrorAction SilentlyContinue).LastWriteTime.ToString("yyyy-MM-dd HH:mm")
+                                        }
+                                        $totalSize = (Get-ChildItem $profilePath -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+                                        $sizeMB = [math]::Round($totalSize / 1MB, 1)
+                                        Write-Host "[Scan]   Size: $sizeMB MB | Last modified: $lastMod"
+                                    } catch {
+                                        $sizeMB = "Error"
+                                        Write-Host "[Scan]   Size calculation error: $_"
+                                    }
+                                }
+                                else {
+                                    Write-Host "[Scan]   Path not found or missing"
+                                }
+                                
+                                $status = "OK"
+                                $shortName = if ($userName) { ($userName -split '\\')[-1] } else { "" }
+                                if ($systemNames -contains $shortName) {
+                                    $status = "System"
+                                }
+                                elseif (-not $profilePath -or -not (Test-Path $profilePath)) {
+                                    $status = "Orphaned"
+                                }
+                                
+                                Write-Host "[Scan]   Status: $status"
+                                
+                                $results.Add([PSCustomObject]@{
+                                    Selected = $false
+                                    UserName = $userName
+                                    ProfilePath = $profilePath
+                                    SID = $sid
+                                    SizeMB = $sizeMB
+                                    LastModified = $lastMod
+                                    Status = $status
+                                })
+                            }
+                            catch {
+                                $errorMessages.Add("Error reading profile $($key.PSChildName): $_")
+                                Write-Host "[Scan]   ERROR: $_"
+                            }
+                        }
+                    }
+                    else {
+                        Write-Host "[Scan] Connecting to remote registry on $TargetComputer via WMI..."
+                        $regProv = Get-WmiObject -ComputerName $TargetComputer -Class StdRegProv -Namespace 'root\default' -ErrorAction Stop
+                        $enumResult = $regProv.EnumKey(2147483650, 'SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList')
+                        $sids = $enumResult.sNames | Where-Object { $_ -match '^S-1-5-21' }
+                        
+                        $totalSids = @($sids).Count
+                        Write-Host "[Scan] Found $totalSids profile SIDs on remote $TargetComputer"
+                        $current = 0
+                        
+                        foreach ($sid in $sids) {
+                            $current++
+                            Write-Host "[Scan] ($current/$totalSids) Processing remote SID $sid..."
+                            try {
+                                $pathResult = $regProv.GetStringValue(2147483650, "SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid", 'ProfileImagePath')
+                                $profilePath = $pathResult.sValue
+                                if ($profilePath) { $profilePath = $profilePath -replace '%SystemDrive%', 'C:' }
+                                
+                                $userName = $null
+                                try {
+                                    $secId = New-Object System.Security.Principal.SecurityIdentifier($sid)
+                                    $ntAccount = $secId.Translate([System.Security.Principal.NTAccount])
+                                    $userName = $ntAccount.Value
+                                } catch {
+                                    $userName = "(Unresolvable)"
+                                }
+                                
+                                Write-Host "[Scan]   User: $userName | Path: $profilePath"
+                                
+                                $results.Add([PSCustomObject]@{
+                                    Selected = $false
+                                    UserName = $userName
+                                    ProfilePath = $profilePath
+                                    SID = $sid
+                                    SizeMB = "Remote"
+                                    LastModified = "Remote"
+                                    Status = "OK"
+                                })
+                            }
+                            catch {
+                                $errorMessages.Add("Error reading remote profile $sid`: $_")
+                                Write-Host "[Scan]   ERROR: $_"
+                            }
+                        }
+                    }
+                }
+                catch {
+                    $errorMessages.Add("Failed to enumerate profiles: $($_.Exception.Message)")
+                    Write-Host "[Scan] FATAL: $($_.Exception.Message)"
+                }
+                
+                Write-Host "[Scan] Scan complete. Found $($results.Count) profiles."
+                return @{ Results = $results; Errors = $errorMessages; Computer = $TargetComputer }
+            })
+            
+            $ps.Runspace = $runspace
+            $asyncResult = $ps.BeginInvoke()
+            
+            # Track how many info stream entries we have shown
+            $script:refreshInfoIndex = 0
+            
+            # Timer to poll for progress and completion without blocking the UI
+            $timer = New-Object System.Windows.Threading.DispatcherTimer
+            $script:activeRefreshTimer = $timer
+            $timer.Interval = [TimeSpan]::FromMilliseconds(150)
+            $timer.Add_Tick({
+                try {
+                    # Guard against stale timer from a previous GUI session
+                    if ($null -eq $ps -or $null -eq $asyncResult) { $timer.Stop(); return }
+                    
+                    # Drain Information stream for live progress
+                    while ($script:refreshInfoIndex -lt $ps.Streams.Information.Count) {
+                        $info = $ps.Streams.Information[$script:refreshInfoIndex]
+                        & $writeOutput -Text "$($info.MessageData)" -Color "Gray"
+                        $script:refreshInfoIndex++
+                    }
+                    
+                    # Update scanning status with count
+                    $scannedSoFar = $ps.Streams.Information | Where-Object { "$($_.MessageData)" -match '^\[Scan\] \(\d+' }
+                    if ($scannedSoFar) {
+                        $controlsRef['txtProfileCount'].Text = "Scanning... ($(@($scannedSoFar).Count) processed)"
+                    }
+                    
+                    if ($asyncResult.IsCompleted) {
+                        $timer.Stop()
+                        $script:activeRefreshTimer = $null
+                        try {
+                            $output = $ps.EndInvoke($asyncResult)
+                            $data = $output | Select-Object -Last 1
+                            
+                            if ($data.Errors) {
+                                foreach ($err in $data.Errors) {
+                                    & $writeOutput -Text $err -Color "Red"
                                 }
                             }
-                            
-                            # Determine status
-                            $status = "OK"
-                            $shortName = if ($userName) { ($userName -split '\\')[-1] } else { "" }
-                            if ($systemNames -contains $shortName) {
-                                $status = "System"
+                            if ($data.Results) {
+                                foreach ($item in $data.Results) {
+                                    $profileListRef.Add($item)
+                                }
+                                $controlsRef['txtProfileCount'].Text = "$($data.Results.Count) profiles found"
+                                & $writeOutput -Text "Found $($data.Results.Count) profiles on $($data.Computer)" -Color "Cyan"
                             }
-                            elseif (-not $profilePath -or -not (Test-Path $profilePath)) {
-                                $status = "Orphaned"
+                            else {
+                                $controlsRef['txtProfileCount'].Text = "0 profiles found"
                             }
-                            
-                            $profileObj = [PSCustomObject]@{
-                                Selected = $false
-                                UserName = $userName
-                                ProfilePath = $profilePath
-                                SID = $sid
-                                SizeMB = $sizeMB
-                                LastModified = $lastMod
-                                Status = $status
-                            }
-                            $script:profileList.Add($profileObj)
                         }
                         catch {
-                            & $script:WriteGuiOutput -Text "Error reading profile $($key.PSChildName): $_" -Color "Red"
+                            $controlsRef['txtProfileCount'].Text = "Error scanning profiles"
+                            & $writeOutput -Text "Scan error: $($_.Exception.Message)" -Color "Red"
+                        }
+                        finally {
+                            $ps.Dispose()
+                            $runspace.Close()
+                            $runspace.Dispose()
+                            $controlsRef['btnRefreshProfiles'].IsEnabled = $true
+                            $controlsRef['progressBar'].Visibility = "Collapsed"
                         }
                     }
                 }
-                else {
-                    # Remote computer via WMI
-                    $regProv = Get-WmiObject -ComputerName $TargetComputer -Class StdRegProv -Namespace 'root\default' -ErrorAction Stop
-                    $enumResult = $regProv.EnumKey(2147483650, 'SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList')
-                    $sids = $enumResult.sNames | Where-Object { $_ -match '^S-1-5-21' }
-                    
-                    foreach ($sid in $sids) {
-                        try {
-                            $pathResult = $regProv.GetStringValue(2147483650, "SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid", 'ProfileImagePath')
-                            $profilePath = $pathResult.sValue
-                            if ($profilePath) { $profilePath = $profilePath -replace '%SystemDrive%', 'C:' }
-                            
-                            $userName = $null
-                            try {
-                                $secId = New-Object System.Security.Principal.SecurityIdentifier($sid)
-                                $ntAccount = $secId.Translate([System.Security.Principal.NTAccount])
-                                $userName = $ntAccount.Value
-                            } catch {
-                                $userName = "(Unresolvable)"
-                            }
-                            
-                            $profileObj = [PSCustomObject]@{
-                                Selected = $false
-                                UserName = $userName
-                                ProfilePath = $profilePath
-                                SID = $sid
-                                SizeMB = "Remote"
-                                LastModified = "Remote"
-                                Status = "OK"
-                            }
-                            $script:profileList.Add($profileObj)
-                        }
-                        catch {
-                            & $script:WriteGuiOutput -Text "Error reading remote profile $sid`: $_" -Color "Red"
-                        }
-                    }
+                catch {
+                    # Stale timer or disposed objects - stop silently
+                    try { $timer.Stop() } catch {}
+                    $script:activeRefreshTimer = $null
                 }
-                
-                $controls['txtProfileCount'].Text = "$($script:profileList.Count) profiles found"
-                & $script:WriteGuiOutput -Text "Found $($script:profileList.Count) profiles on $TargetComputer" -Color "Cyan"
-            }
-            catch {
-                $controls['txtProfileCount'].Text = "Error scanning profiles"
-                & $script:WriteGuiOutput -Text "Failed to enumerate profiles: $($_.Exception.Message)" -Color "Red"
-            }
+            }.GetNewClosure())
+            $timer.Start()
         }
         
         # Event Handler: Refresh Profiles
@@ -909,33 +1042,52 @@ begin {
             $isLocal = ($targetComputer -eq $env:COMPUTERNAME -or $targetComputer -eq 'localhost' -or $targetComputer -eq '.')
             $removedCount = 0
             $failedCount = 0
+            $totalSelected = $selected.Count
+            $currentIndex = 0
+            
+            & $script:WriteGuiOutput -Text "Starting force removal of $totalSelected profile(s) on $targetComputer (local=$isLocal)" -Color "Cyan"
+            & $script:WriteGuiOutput -Text "---" -Color "Gray"
             
             foreach ($prof in $selected) {
-                & $script:WriteGuiOutput -Text "Removing profile: $($prof.UserName) [$($prof.SID)]..." -Color "Yellow"
+                $currentIndex++
+                & $script:WriteGuiOutput -Text "[$currentIndex/$totalSelected] Removing: $($prof.UserName) | SID: $($prof.SID)" -Color "Yellow"
+                & $script:WriteGuiOutput -Text "  Path: $($prof.ProfilePath) | Size: $($prof.SizeMB) MB | Status: $($prof.Status)" -Color "Gray"
                 [System.Windows.Forms.Application]::DoEvents()
                 
                 $success = $true
                 
                 # Step 1: Unload registry hive if loaded
+                & $script:WriteGuiOutput -Text "  Step 1/4: Checking registry hive..." -Color "Gray"
                 try {
                     if ($isLocal) {
                         $hiveLoaded = Test-Path "Registry::HKEY_USERS\$($prof.SID)"
                         if ($hiveLoaded) {
-                            & $script:WriteGuiOutput -Text "  Unloading registry hive for $($prof.UserName)..." -Color "Gray"
+                            & $script:WriteGuiOutput -Text "  Hive loaded - unloading HKU\$($prof.SID)..." -Color "Gray"
                             $null = & reg.exe unload "HKU\$($prof.SID)" 2>&1
+                            & $script:WriteGuiOutput -Text "  Hive unloaded." -Color "Gray"
                         }
+                        else {
+                            & $script:WriteGuiOutput -Text "  Hive not loaded, skipping." -Color "Gray"
+                        }
+                    }
+                    else {
+                        & $script:WriteGuiOutput -Text "  Remote target - hive unload skipped." -Color "Gray"
                     }
                 } catch {
                     & $script:WriteGuiOutput -Text "  Warning: Could not unload hive: $_" -Color "Yellow"
                 }
                 
                 # Step 2: Remove registry entry
+                & $script:WriteGuiOutput -Text "  Step 2/4: Removing ProfileList registry key..." -Color "Gray"
                 try {
                     if ($isLocal) {
                         $regKey = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$($prof.SID)"
                         if (Test-Path $regKey) {
                             Remove-Item -Path $regKey -Recurse -Force -ErrorAction Stop
-                            & $script:WriteGuiOutput -Text "  Registry entry removed." -Color "Gray"
+                            & $script:WriteGuiOutput -Text "  Registry entry removed: $regKey" -Color "Gray"
+                        }
+                        else {
+                            & $script:WriteGuiOutput -Text "  Registry key not found (already removed)." -Color "Gray"
                         }
                     }
                     else {
@@ -955,15 +1107,17 @@ begin {
                 }
                 
                 # Step 3: Remove profile folder
+                & $script:WriteGuiOutput -Text "  Step 3/4: Removing profile folder..." -Color "Gray"
                 if ($prof.ProfilePath) {
                     try {
                         $folderPath = $prof.ProfilePath
                         if (-not $isLocal) {
                             $folderPath = "\\$targetComputer\" + ($prof.ProfilePath -replace ':', '$')
                         }
+                        & $script:WriteGuiOutput -Text "  Target path: $folderPath" -Color "Gray"
                         if (Test-Path $folderPath) {
                             Remove-Item -Path $folderPath -Recurse -Force -ErrorAction Stop
-                            & $script:WriteGuiOutput -Text "  Profile folder removed." -Color "Gray"
+                            & $script:WriteGuiOutput -Text "  Profile folder removed successfully." -Color "Gray"
                         }
                         else {
                             & $script:WriteGuiOutput -Text "  Profile folder not found (already removed or orphaned)." -Color "Gray"
@@ -973,6 +1127,38 @@ begin {
                         & $script:WriteGuiOutput -Text "  ERROR removing folder: $($_.Exception.Message)" -Color "Red"
                         $success = $false
                     }
+                }
+                
+                # Step 4: Remove local user account (so it disappears from Computer Management)
+                & $script:WriteGuiOutput -Text "  Step 4/4: Checking for local user account..." -Color "Gray"
+                try {
+                    $shortName = if ($prof.UserName) { ($prof.UserName -split '\\')[-1] } else { $null }
+                    if ($shortName -and $shortName -ne '(Unresolvable)') {
+                        & $script:WriteGuiOutput -Text "  Looking up local account: $shortName" -Color "Gray"
+                        if ($isLocal) {
+                            $localUser = $null
+                            try { $localUser = Get-LocalUser -Name $shortName -ErrorAction SilentlyContinue } catch {}
+                            if ($localUser) {
+                                Remove-LocalUser -Name $shortName -ErrorAction Stop
+                                & $script:WriteGuiOutput -Text "  Local user account '$shortName' removed." -Color "Gray"
+                            }
+                            else {
+                                & $script:WriteGuiOutput -Text "  No local account found for '$shortName' (domain account or already removed)." -Color "Gray"
+                            }
+                        }
+                        else {
+                            Invoke-Command -ComputerName $targetComputer -ScriptBlock {
+                                param($name)
+                                $u = $null
+                                try { $u = Get-LocalUser -Name $name -ErrorAction SilentlyContinue } catch {}
+                                if ($u) { Remove-LocalUser -Name $name -ErrorAction Stop }
+                            } -ArgumentList $shortName -ErrorAction Stop
+                            & $script:WriteGuiOutput -Text "  Remote user account '$shortName' removed." -Color "Gray"
+                        }
+                    }
+                }
+                catch {
+                    & $script:WriteGuiOutput -Text "  Note: Could not remove user account: $($_.Exception.Message)" -Color "Yellow"
                 }
                 
                 if ($success) {
@@ -1214,40 +1400,113 @@ begin {
             })
             
             $powershell.Runspace = $runspace
-            $asyncResult = $powershell.BeginInvoke()
             
-            # Monitor completion
-            while (-not $asyncResult.IsCompleted) {
-                Start-Sleep -Milliseconds 100
-                [System.Windows.Forms.Application]::DoEvents()
-                if ($script:guiStopRequested) {
-                    $powershell.Stop()
-                    break
+            # Use PSDataCollection for output so we can read it incrementally
+            $outputCollection = New-Object System.Management.Automation.PSDataCollection[PSObject]
+            $asyncResult = $powershell.BeginInvoke($outputCollection, $outputCollection)
+            
+            # Track stream positions so we only show new entries each tick
+            $script:lastInfoIndex = 0
+            $script:lastWarningIndex = 0
+            $script:lastErrorIndex = 0
+            $script:lastOutputIndex = 0
+            
+            $writeRef = $script:WriteGuiOutput
+            $controlsRef = $controls
+            $paramsRef = $params
+            
+            # DispatcherTimer polls streams every 200ms without blocking the UI
+            $runTimer = New-Object System.Windows.Threading.DispatcherTimer
+            $script:activeRunTimer = $runTimer
+            $runTimer.Interval = [TimeSpan]::FromMilliseconds(200)
+            $runTimer.Add_Tick({
+                try {
+                    # Guard against stale timer from a previous GUI session
+                    if ($null -eq $powershell -or $null -eq $asyncResult) { $runTimer.Stop(); return }
+                    
+                    # Drain new output objects
+                    while ($script:lastOutputIndex -lt $outputCollection.Count) {
+                        $item = $outputCollection[$script:lastOutputIndex]
+                        if ($item) {
+                            & $writeRef -Text "$item" -Color "White"
+                        }
+                        $script:lastOutputIndex++
+                    }
+                    
+                    # Drain Information stream (Write-Host output goes here in PS5.1 runspaces)
+                    while ($script:lastInfoIndex -lt $powershell.Streams.Information.Count) {
+                        $info = $powershell.Streams.Information[$script:lastInfoIndex]
+                        & $writeRef -Text "$($info.MessageData)" -Color "White"
+                        $script:lastInfoIndex++
+                    }
+                    
+                    # Drain Warning stream
+                    while ($script:lastWarningIndex -lt $powershell.Streams.Warning.Count) {
+                        $warn = $powershell.Streams.Warning[$script:lastWarningIndex]
+                        & $writeRef -Text "[WARNING] $($warn.Message)" -Color "Yellow"
+                        $script:lastWarningIndex++
+                    }
+                    
+                    # Drain Error stream
+                    while ($script:lastErrorIndex -lt $powershell.Streams.Error.Count) {
+                        $err = $powershell.Streams.Error[$script:lastErrorIndex]
+                        & $writeRef -Text "[ERROR] $($err.Exception.Message)" -Color "Red"
+                        $script:lastErrorIndex++
+                    }
+                    
+                    # Check for stop request
+                    if ($script:guiStopRequested) {
+                        $powershell.Stop()
+                    }
+                    
+                    # When completed, clean up
+                    if ($asyncResult.IsCompleted) {
+                        $runTimer.Stop()
+                        $script:activeRunTimer = $null
+                        
+                        try {
+                            $powershell.EndInvoke($asyncResult)
+                        }
+                        catch {
+                            & $writeRef -Text "Operation stopped or encountered an error." -Color "Yellow"
+                        }
+                        finally {
+                            $powershell.Dispose()
+                            $runspace.Close()
+                            $runspace.Dispose()
+                        }
+                        
+                        $script:guiRunning = $false
+                        $controlsRef['btnRun'].IsEnabled = $true
+                        $controlsRef['btnStop'].IsEnabled = $false
+                        $controlsRef['progressBar'].Visibility = "Collapsed"
+                        
+                        & $writeRef -Text "---" -Color "Gray"
+                        & $writeRef -Text "Operation completed." -Color "Green"
+                        
+                        if (-not $paramsRef['Quiet']) {
+                            [System.Windows.MessageBox]::Show("Profile management operation completed!", "Complete", "OK", "Information")
+                        }
+                    }
                 }
+                catch {
+                    # Stale timer or disposed objects - stop silently
+                    try { $runTimer.Stop() } catch {}
+                    $script:activeRunTimer = $null
+                }
+            }.GetNewClosure())
+            $runTimer.Start()
+        })
+        
+        # Clean up timers when window closes (prevents stale timers on re-run)
+        $window.Add_Closed({
+            if ($script:activeRefreshTimer) {
+                try { $script:activeRefreshTimer.Stop() } catch {}
+                $script:activeRefreshTimer = $null
             }
-            
-            try {
-                $powershell.EndInvoke($asyncResult)
-            }
-            catch {
-                & $script:WriteGuiOutput -Text "Operation stopped or encountered an error." -Color "Yellow"
-            }
-            finally {
-                $powershell.Dispose()
-                $runspace.Close()
-                $runspace.Dispose()
-            }
-            
-            $script:guiRunning = $false
-            $controls['btnRun'].IsEnabled = $true
-            $controls['btnStop'].IsEnabled = $false
-            $controls['progressBar'].Visibility = "Collapsed"
-            
-            & $script:WriteGuiOutput -Text "---" -Color "Gray"
-            & $script:WriteGuiOutput -Text "Operation completed." -Color "Green"
-            
-            if (-not $params['Quiet']) {
-                [System.Windows.MessageBox]::Show("Profile management operation completed!", "Complete", "OK", "Information")
+            if ($script:activeRunTimer) {
+                try { $script:activeRunTimer.Stop() } catch {}
+                $script:activeRunTimer = $null
             }
         })
         
@@ -1258,18 +1517,21 @@ begin {
 
     #region UI Mode Check
     if ($UI) {
+        $script:UIMode = $true
         Show-DelprofPSGUI
         return
     }
     #endregion
 
     #region Initialization
+    $script:UIMode = $false
     $script:StartTime = Get-Date
     $script:Version = '2.0.0'
     $script:RunId = [guid]::NewGuid().ToString('N')
     $script:TotalProfilesProcessed = 0
     $script:TotalProfilesDeleted = 0
     $script:TotalSpaceFreed = 0
+    $script:SuppressDeletion = $false
     $script:Results = [System.Collections.Generic.List[object]]::new()
     $script:ComputerQueue = [System.Collections.Generic.List[string]]::new()
 
@@ -1456,12 +1718,12 @@ begin {
             [string]$Message,
             
             [Parameter()]
-            [ValidateSet('INFO', 'WARNING', 'ERROR', 'SUCCESS', 'VERBOSE')]
+            [ValidateSet('INFO', 'WARNING', 'ERROR', 'SUCCESS', 'DEBUG', 'VERBOSE')]
             [string]$Level = 'INFO'
         )
         
         $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-        $logEntry = "[$timestamp] [$Level] [$script:RunId] $Message"
+        $logEntry = "[$timestamp] [$Level] $Message"
         
         # Write to log file if specified
         if ($LogPath) {
@@ -1479,7 +1741,8 @@ begin {
                 'ERROR' { Write-Host $logEntry -ForegroundColor Red }
                 'WARNING' { Write-Host $logEntry -ForegroundColor Yellow }
                 'SUCCESS' { Write-Host $logEntry -ForegroundColor Green }
-                'VERBOSE' { Write-Verbose $Message }
+                'DEBUG' { Write-Host $logEntry -ForegroundColor DarkGray }
+                'VERBOSE' { Write-Host $logEntry -ForegroundColor DarkGray }
                 default { Write-Host $logEntry }
             }
         }
@@ -1551,6 +1814,20 @@ begin {
         return $false
     }
 
+    function Format-Byte {
+        param([long]$Bytes)
+        
+        if ($Bytes -lt 0) { return 'Error' }
+        if ($Bytes -eq 0) { return '0 B' }
+        
+        $sizes = @('B', 'KB', 'MB', 'GB', 'TB')
+        $order = [math]::Floor([math]::Log($Bytes, 1024))
+        $order = [math]::Min($order, $sizes.Count - 1)
+        
+        $formatted = [math]::Round($Bytes / [math]::Pow(1024, $order), 2)
+        return "$formatted $($sizes[$order])"
+    }
+
     function Get-ProfileFolderSize {
         param([string]$Path)
         
@@ -1606,20 +1883,6 @@ begin {
             # Ignore errors
         }
         return $lockedFiles
-    }
-
-    function Format-Byte {
-        param([long]$Bytes)
-        
-        if ($Bytes -lt 0) { return 'Error' }
-        if ($Bytes -eq 0) { return '0 B' }
-        
-        $sizes = @('B', 'KB', 'MB', 'GB', 'TB')
-        $order = [math]::Floor([math]::Log($Bytes, 1024))
-        $order = [math]::Min($order, $sizes.Count - 1)
-        
-        $formatted = [math]::Round($Bytes / [math]::Pow(1024, $order), 2)
-        return "$formatted $($sizes[$order])"
     }
 
     function Get-AgeColor {
@@ -1909,22 +2172,28 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
     function Test-ComputerConnection {
         param([string]$Computer)
         
+        Write-DPLog -Message "  [ConnTest] Pinging $Computer..." -Level 'DEBUG'
         try {
             # Test connection
             $ping = Test-Connection -ComputerName $Computer -Count 1 -Quiet -ErrorAction SilentlyContinue
             if (-not $ping) {
+                Write-DPLog -Message "  [ConnTest] $Computer is unreachable" -Level 'DEBUG'
                 return @{ Success = $false; Error = 'Host unreachable' }
             }
+            Write-DPLog -Message "  [ConnTest] Ping OK. Testing admin share \\$Computer\ADMIN`$..." -Level 'DEBUG'
             
             # Test admin access
-            $testPath = "\\$Computer\ADMIN$"
+            $testPath = "\\$Computer\ADMIN`$"
             if (-not (Test-Path $testPath -ErrorAction SilentlyContinue)) {
+                Write-DPLog -Message "  [ConnTest] Admin share not accessible on $Computer" -Level 'DEBUG'
                 return @{ Success = $false; Error = 'Admin share not accessible' }
             }
             
+            Write-DPLog -Message "  [ConnTest] $Computer connectivity OK" -Level 'DEBUG'
             return @{ Success = $true; Error = $null }
         }
         catch {
+            Write-DPLog -Message "  [ConnTest] Exception testing $Computer`: $($_.Exception.Message)" -Level 'DEBUG'
             return @{ Success = $false; Error = $_.Exception.Message }
         }
     }
@@ -1960,23 +2229,31 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
     function Get-ActiveSession {
         param([string]$ComputerName)
         
+        Write-DPLog -Message "  [Sessions] Detecting active sessions on $ComputerName..." -Level 'DEBUG'
         try {
             $sessions = @()
             
             # Method 1: Query user.exe (quser)
+            Write-DPLog -Message "  [Sessions] Method 1: quser /server:$ComputerName" -Level 'DEBUG'
             try {
                 $quserOutput = quser /server:$ComputerName 2>$null
                 if ($quserOutput) {
-                    $sessions += $quserOutput | Select-String -Pattern '(\S+)\s+\d+\s+(\S+)' | ForEach-Object {
+                    $quserSessions = $quserOutput | Select-String -Pattern '(\S+)\s+\d+\s+(\S+)' | ForEach-Object {
                         $matches[1]
                     }
+                    $sessions += $quserSessions
+                    Write-DPLog -Message "  [Sessions] quser found $($quserSessions.Count) session(s)" -Level 'DEBUG'
+                }
+                else {
+                    Write-DPLog -Message "  [Sessions] quser returned no sessions" -Level 'DEBUG'
                 }
             }
             catch {
-                # quser may not be available
+                Write-DPLog -Message "  [Sessions] quser not available or failed" -Level 'DEBUG'
             }
             
             # Method 2: Get logged on users via WMI
+            Write-DPLog -Message "  [Sessions] Method 2: WMI Win32_LoggedOnUser" -Level 'DEBUG'
             try {
                 $loggedOn = Get-WmiObject -Class Win32_LoggedOnUser -ComputerName $ComputerName -ErrorAction SilentlyContinue @script:CredentialSplat |
                     ForEach-Object { 
@@ -1984,12 +2261,14 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
                         "$($matches[1])\$($matches[2])"
                     } | Select-Object -Unique
                 $sessions += $loggedOn
+                Write-DPLog -Message "  [Sessions] WMI found $(@($loggedOn).Count) logged-on user(s)" -Level 'DEBUG'
             }
             catch {
-                # WMI may fail
+                Write-DPLog -Message "  [Sessions] WMI LoggedOnUser query failed" -Level 'DEBUG'
             }
             
             # Method 3: Get explorer.exe processes
+            Write-DPLog -Message "  [Sessions] Method 3: explorer.exe process owners" -Level 'DEBUG'
             try {
                 $explorerUsers = Get-WmiObject -Class Win32_Process -ComputerName $ComputerName -Filter "Name='explorer.exe'" -ErrorAction SilentlyContinue |
                     ForEach-Object { 
@@ -1997,14 +2276,18 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
                         if ($owner) { "$($owner.Domain)\$($owner.User)" }
                     } | Select-Object -Unique
                 $sessions += $explorerUsers
+                Write-DPLog -Message "  [Sessions] Explorer.exe found $(@($explorerUsers).Count) user(s)" -Level 'DEBUG'
             }
             catch {
-                # Process query may fail
+                Write-DPLog -Message "  [Sessions] Explorer.exe query failed" -Level 'DEBUG'
             }
             
-            return $sessions | Select-Object -Unique
+            $uniqueSessions = $sessions | Select-Object -Unique
+            Write-DPLog -Message "  [Sessions] Total unique active sessions: $(@($uniqueSessions).Count) - $($uniqueSessions -join ', ')" -Level 'DEBUG'
+            return $uniqueSessions
         }
         catch {
+            Write-DPLog -Message "  [Sessions] Exception: $($_.Exception.Message)" -Level 'DEBUG'
             return @()
         }
     }
@@ -2017,6 +2300,7 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
             [string]$ComputerName
         )
         
+        Write-DPLog -Message "    [Age] Calculating age for SID $SID using method '$Method'" -Level 'DEBUG'
         $lastUsed = $null
         $source = 'Unknown'
         
@@ -2115,6 +2399,7 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
             $source = 'Unknown'
         }
         
+        Write-DPLog -Message "    [Age] Result: LastUsed=$($lastUsed.ToString('yyyy-MM-dd HH:mm')), Source=$source" -Level 'DEBUG'
         return @{ LastUsed = $lastUsed; Source = $source }
     }
 
@@ -2396,6 +2681,7 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
         param([string]$ComputerName)
         
         Write-DPLog -Message "Scanning profiles on $ComputerName..." -Level 'INFO'
+        Write-DPLog -Message "  [Registry] Opening ProfileList registry key..." -Level 'DEBUG'
         
         $profiles = @()
         
@@ -2403,6 +2689,7 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
             $profileListPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList"
             
             if ($ComputerName -ne $env:COMPUTERNAME -and $ComputerName -ne 'localhost' -and $ComputerName -ne '.') {
+                Write-DPLog -Message "  [Registry] Using WMI for remote registry access on $ComputerName" -Level 'DEBUG'
                 # Use WMI for remote registry
                 $profileKeys = Get-WmiObject -ComputerName $ComputerName -Class StdRegProv -Namespace 'root\default' -ErrorAction Stop @script:CredentialSplat |
                     ForEach-Object { $_.EnumKey(2147483650, 'SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList') } |
@@ -2412,6 +2699,7 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
                 # Cache WMI connection outside loop to avoid reconnecting per-SID
                 $regProv = Get-WmiObject -ComputerName $ComputerName -Class StdRegProv -Namespace 'root\default' -ErrorAction Stop @script:CredentialSplat
                 
+                Write-DPLog -Message "  [Registry] Found $(@($profileKeys).Count) SIDs on remote $ComputerName" -Level 'DEBUG'
                 foreach ($sid in $profileKeys) {
                     try {
                         $profilePathValue = $regProv.GetStringValue(2147483650, "SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid", 'ProfileImagePath')
@@ -2423,6 +2711,7 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
                             $profilePath = $profilePath -replace '%SystemDrive%', 'C:'
                         }
                         
+                        Write-DPLog -Message "    [Registry] $sid -> $profilePath" -Level 'DEBUG'
                         $profiles += @{
                             SID = $sid
                             ProfilePath = $profilePath
@@ -2436,13 +2725,16 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
                 }
             }
             else {
+                Write-DPLog -Message "  [Registry] Using local registry access" -Level 'DEBUG'
                 # Local registry access
                 $profileKeys = Get-ChildItem $profileListPath -ErrorAction Stop | 
                     Where-Object { $_.PSChildName -match '^S-1-5-21' }
                 
+                Write-DPLog -Message "  [Registry] Found $(@($profileKeys).Count) profile SIDs locally" -Level 'DEBUG'
                 foreach ($key in $profileKeys) {
                     try {
                         $props = Get-ItemProperty $key.PSPath
+                        Write-DPLog -Message "    [Registry] $($key.PSChildName) -> $($props.ProfileImagePath)" -Level 'DEBUG'
                         $profiles += @{
                             SID = $key.PSChildName
                             ProfilePath = $props.ProfileImagePath
@@ -2461,6 +2753,7 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
             return $null
         }
         
+        Write-DPLog -Message "  [Registry] Total profiles read: $($profiles.Count)" -Level 'DEBUG'
         return $profiles
     }
 
@@ -2541,25 +2834,31 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
         
         $attempt = 0
         $success = $false
+        Write-DPLog -Message "    [Delete] Removing profile folder $ProfilePath (max $MaxRetries attempts)" -Level 'DEBUG'
         
         while ($attempt -lt $MaxRetries -and -not $success) {
             $attempt++
+            Write-DPLog -Message "    [Delete] Attempt $attempt of $MaxRetries..." -Level 'DEBUG'
             
             try {
                 # Unload registry hive if requested
                 if ($UnloadHives) {
+                    Write-DPLog -Message "    [Delete] Unloading registry hive for $ProfilePath" -Level 'DEBUG'
                     Dismount-RegistryHive -ProfilePath $ProfilePath
                 }
                 
                 # Remove read-only attributes
+                Write-DPLog -Message "    [Delete] Clearing read-only attributes..." -Level 'DEBUG'
                 Get-ChildItem -Path $ProfilePath -Recurse -Force -ErrorAction SilentlyContinue | 
                     ForEach-Object { $_.Attributes = $_.Attributes -band -bnot [System.IO.FileAttributes]::ReadOnly }
                 
                 # Remove the directory
                 if ($ComputerName -eq $env:COMPUTERNAME -or $ComputerName -eq 'localhost' -or $ComputerName -eq '.') {
+                    Write-DPLog -Message "    [Delete] Removing local directory..." -Level 'DEBUG'
                     Remove-Item -Path $ProfilePath -Recurse -Force -ErrorAction Stop
                 }
                 else {
+                    Write-DPLog -Message "    [Delete] Removing remote directory via Invoke-Command..." -Level 'DEBUG'
                     # Remote deletion using Invoke-Command
                     $scriptBlock = {
                         param($Path)
@@ -2570,6 +2869,7 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
                     Invoke-Command -ComputerName $ComputerName -ScriptBlock $scriptBlock -ArgumentList $ProfilePath -ErrorAction Stop @script:CredentialSplat
                 }
                 
+                Write-DPLog -Message "    [Delete] Folder removed successfully on attempt $attempt" -Level 'DEBUG'
                 $success = $true
             }
             catch {
@@ -2596,10 +2896,12 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
         )
         
         Write-DPLog -Message "Deleting profile for '$UserName' on $ComputerName..." -Level 'INFO'
+        Write-DPLog -Message "  [Remove] SID=$SID, Path=$ProfilePath" -Level 'DEBUG'
         
         $success = $true
         
         # Step 1: Remove from registry
+        Write-DPLog -Message "  [Remove] Step 1: Removing ProfileList registry key for $SID" -Level 'DEBUG'
         if ($PSCmdlet.ShouldProcess("Remove registry key for $SID", "Delete Profile Registry Entry")) {
             try {
                 $regKey = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$SID"
@@ -2607,9 +2909,14 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
                 if ($ComputerName -eq $env:COMPUTERNAME -or $ComputerName -eq 'localhost' -or $ComputerName -eq '.') {
                     if (Test-Path $regKey) {
                         Remove-Item -Path $regKey -Recurse -Force
+                        Write-DPLog -Message "  [Remove] Local registry key deleted" -Level 'DEBUG'
+                    }
+                    else {
+                        Write-DPLog -Message "  [Remove] Registry key not found (already removed)" -Level 'DEBUG'
                     }
                 }
                 else {
+                    Write-DPLog -Message "  [Remove] Removing remote registry key via Invoke-Command" -Level 'DEBUG'
                     $scriptBlock = {
                         param($sid)
                         $regPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList"
@@ -2629,6 +2936,7 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
         }
         
         # Step 2: Remove profile directory
+        Write-DPLog -Message "  [Remove] Step 2: Removing profile directory $ProfilePath" -Level 'DEBUG'
         if ($success -and $PSCmdlet.ShouldProcess("Remove directory $ProfilePath", "Delete Profile Folder")) {
             if (Remove-ProfileWithRetry -ProfilePath $ProfilePath -SID $SID -ComputerName $ComputerName) {
                 Write-DPLog -Message "Profile directory removed for $UserName" -Level 'SUCCESS'
@@ -2639,6 +2947,7 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
             }
         }
         
+        Write-DPLog -Message "  [Remove] Result for $UserName`: $( if ($success) { 'SUCCESS' } else { 'FAILED' } )" -Level 'DEBUG'
         return $success
     }
     #endregion
@@ -2651,22 +2960,29 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
         Write-DPLog -Message "Processing computer: $ComputerName" -Level 'INFO'
         
         # Test connection
+        Write-DPLog -Message "  [Process] Testing connectivity to $ComputerName..." -Level 'DEBUG'
         $connection = Test-ComputerConnection -Computer $ComputerName
         if (-not $connection.Success) {
             Write-DPLog -Message "Cannot connect to $ComputerName`: $($connection.Error)" -Level 'ERROR'
             return
         }
+        Write-DPLog -Message "  [Process] Connection to $ComputerName verified" -Level 'DEBUG'
         
         # Get active sessions
         $activeSessions = @()
         if (-not $IgnoreActiveSessions) {
+            Write-DPLog -Message "  [Process] Checking active sessions (IgnoreActiveSessions=$IgnoreActiveSessions)..." -Level 'DEBUG'
             $activeSessions = Get-ActiveSession -ComputerName $ComputerName
-            Write-DPLog -Message "Active sessions on $ComputerName`: $($activeSessions -join ', ')" -Level 'VERBOSE'
+            Write-DPLog -Message "Active sessions on $ComputerName`: $($activeSessions -join ', ')" -Level 'INFO'
+        }
+        else {
+            Write-DPLog -Message "  [Process] Skipping active session check (IgnoreActiveSessions=True)" -Level 'DEBUG'
         }
         
         # Get profiles
         $profiles = Get-UserProfile -ComputerName $ComputerName
         if ($null -eq $profiles) {
+            Write-DPLog -Message "  [Process] No profiles returned for $ComputerName - aborting" -Level 'DEBUG'
             return
         }
         
@@ -2677,32 +2993,41 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
             $sid = $profileInfo.SID
             $profilePath = $profileInfo.ProfilePath
             
+            Write-DPLog -Message "  [Profile] ---- Processing SID: $sid ----" -Level 'DEBUG'
+            
             if (-not $profilePath) {
-                Write-DPLog -Message "Profile $sid has no path, skipping" -Level 'WARNING'
+                Write-DPLog -Message "  [Profile] SID $sid has no path, skipping" -Level 'WARNING'
                 continue
             }
+            Write-DPLog -Message "  [Profile] Path: $profilePath" -Level 'DEBUG'
             
             # Resolve username
+            Write-DPLog -Message "  [Profile] Resolving SID to username..." -Level 'DEBUG'
             $userName = ConvertTo-UserName -SID $sid
             if (-not $userName) {
                 $userName = "Unknown ($sid)"
+                Write-DPLog -Message "  [Profile] SID could not be resolved, using: $userName" -Level 'DEBUG'
+            }
+            else {
+                Write-DPLog -Message "  [Profile] Resolved: $userName" -Level 'DEBUG'
             }
             
             # Check if protected
             if (-not $IncludeSystemProfiles) {
                 $protectCheck = Test-IsProtectedProfile -UserName $userName -SID $sid
                 if ($protectCheck) {
-                    Write-DPLog -Message "Skipping protected profile: $userName" -Level 'VERBOSE'
+                    Write-DPLog -Message "  [Profile] Skipping protected profile: $userName" -Level 'DEBUG'
                     continue
                 }
             }
             
             # Get profile type
             $profType = Get-ProfileType -ProfileInfo $profileInfo
+            Write-DPLog -Message "  [Profile] Type: $profType" -Level 'DEBUG'
             
             # Skip corrupted unless requested or FixCorruption is enabled
             if ($profType -like 'Corrupted*' -and -not $IncludeCorrupted -and -not $FixCorruption) {
-                Write-DPLog -Message "Skipping corrupted profile: $userName" -Level 'VERBOSE'
+                Write-DPLog -Message "  [Profile] Skipping corrupted profile: $userName ($profType)" -Level 'DEBUG'
                 continue
             }
             
@@ -2748,25 +3073,33 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
             
             # Calculate age in days
             $ageInDays = if ($lastUsed -eq [DateTime]::MinValue) { -1 } else { [math]::Floor(((Get-Date) - $lastUsed).TotalDays) }
+            Write-DPLog -Message "  [Profile] $userName - Age: $ageInDays days (source: $ageSource, threshold: $DaysInactive days)" -Level 'DEBUG'
             
             # Check age criteria
             if ($ageInDays -lt $DaysInactive -and $ageInDays -ge 0) {
-                Write-DPLog -Message "Profile $userName is too recent ($ageInDays days, source: $ageSource)" -Level 'VERBOSE'
+                Write-DPLog -Message "  [Profile] $userName is too recent ($ageInDays < $DaysInactive days), skipping" -Level 'DEBUG'
                 continue
             }
             
             # Get profile size (only calculate when needed for display or filtering)
-            $sizeBytes = if ($ShowSpace -or $MinProfileSizeMB -or $MaxProfileSizeMB -or $Detailed) {
+            $needsSize = $ShowSpace -or $MinProfileSizeMB -or $MaxProfileSizeMB -or $Detailed
+            Write-DPLog -Message "  [Profile] Calculating size: $needsSize" -Level 'DEBUG'
+            $sizeBytes = if ($needsSize) {
                 Get-ProfileFolderSize -Path $profilePath
             } else { 0 }
             $sizeFormatted = Format-Byte -Bytes $sizeBytes
+            if ($needsSize) {
+                Write-DPLog -Message "  [Profile] Size: $sizeFormatted ($sizeBytes bytes)" -Level 'DEBUG'
+            }
             
             # Apply filters
+            Write-DPLog -Message "  [Profile] Applying include/exclude/size/type filters..." -Level 'DEBUG'
             $passesFilter = Test-ProfileFilter -UserName $userName -SID $sid -ProfilePath $profilePath -ProfileSize $sizeBytes -ActualProfileType $profType
             if (-not $passesFilter) {
-                Write-DPLog -Message "Profile $userName filtered out" -Level 'VERBOSE'
+                Write-DPLog -Message "  [Profile] $userName filtered out by include/exclude/size/type criteria" -Level 'DEBUG'
                 continue
             }
+            Write-DPLog -Message "  [Profile] $userName passed all filters" -Level 'DEBUG'
             
             # Check for active session
             $hasActiveSession = $false
@@ -2778,8 +3111,11 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
             }
             
             if ($hasActiveSession -and -not $IgnoreActiveSessions) {
-                Write-DPLog -Message "Skipping $userName - active session detected" -Level 'WARNING'
+                Write-DPLog -Message "  [Profile] Skipping $userName - active session detected" -Level 'WARNING'
                 continue
+            }
+            if ($hasActiveSession) {
+                Write-DPLog -Message "  [Profile] $userName has active session but IgnoreActiveSessions is enabled" -Level 'DEBUG'
             }
             
             # Build result object
@@ -2819,8 +3155,9 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
                 }
             }
             
-            # Perform deletion if requested
-            if ($Delete -and -not $hasActiveSession) {
+            # Perform deletion if requested (skipped during mass deletion enumeration pass)
+            if ($Delete -and -not $hasActiveSession -and -not $script:SuppressDeletion) {
+                Write-DPLog -Message "  [Profile] DELETING $userName ($ageInDays days, $sizeFormatted)..." -Level 'DEBUG'
                 $targetDesc = "Delete profile for '$userName' on '$ComputerName' ($ageInDays days old, $sizeFormatted)"
                 if ($PSCmdlet.ShouldProcess($targetDesc, 'Delete User Profile')) {
                     # Backup profile before deletion if requested
@@ -2850,9 +3187,10 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
             
             $script:Results.Add($result)
             $script:TotalProfilesProcessed++
+            Write-DPLog -Message "  [Profile] $userName added to results (Deleted=$($result.Deleted), Error=$($result.Error))" -Level 'DEBUG'
         }
         
-        Write-DPLog -Message "Finished processing $ComputerName" -Level 'INFO'
+        Write-DPLog -Message "Finished processing $ComputerName - $script:TotalProfilesProcessed profile(s) processed so far" -Level 'INFO'
     }
 
     function Show-Summary {
@@ -2913,6 +3251,15 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
 
     #region Script Entry Point
     Write-DPHeader
+    Write-DPLog -Message "Parameters: DaysInactive=$DaysInactive, AgeCalculation=$AgeCalculation, Delete=$Delete, Preview=$Preview, Force=$Force" -Level 'DEBUG'
+    Write-DPLog -Message "Parameters: ShowSpace=$ShowSpace, Detailed=$Detailed, UnloadHives=$UnloadHives, UseParallel=$UseParallel" -Level 'DEBUG'
+    Write-DPLog -Message "Parameters: Include=[$($Include -join ', ')], Exclude=[$($Exclude -join ', ')], ProfileType=$ProfileType" -Level 'DEBUG'
+    Write-DPLog -Message "Parameters: ComputerName=[$($ComputerName -join ', ')], Interactive=$Interactive, IgnoreActiveSessions=$IgnoreActiveSessions" -Level 'DEBUG'
+    if ($ConfigFile) { Write-DPLog -Message "Parameters: ConfigFile=$ConfigFile" -Level 'DEBUG' }
+    if ($LogPath) { Write-DPLog -Message "Parameters: LogPath=$LogPath" -Level 'DEBUG' }
+    if ($OutputPath) { Write-DPLog -Message "Parameters: OutputPath=$OutputPath" -Level 'DEBUG' }
+    if ($HtmlReport) { Write-DPLog -Message "Parameters: HtmlReport=$HtmlReport" -Level 'DEBUG' }
+    if ($BackupPath) { Write-DPLog -Message "Parameters: BackupPath=$BackupPath" -Level 'DEBUG' }
     
     # Log to event log
     Write-EventLogEntry -Message "Delprof2-PS started. Version: $script:Version, Delete mode: $Delete, Days inactive: $DaysInactive" -EntryType Information -EventId 1000
@@ -2991,17 +3338,26 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
 }
 
 process {
-    # Mass deletion safeguard - warn if processing many profiles
+    if ($script:UIMode) { return }
+    # Mass deletion safeguard - enumerate first, then delete from collected results
     if ($Delete -and -not $Force -and -not $Quiet -and -not $Interactive) {
-        # First pass - count eligible profiles without deleting
-        $estimatedDeletions = 0
-        foreach ($computer in $ComputerName) {
-            Invoke-ComputerProcessing -ComputerName $computer.Trim()
-            $eligibleOnComputer = $script:Results | Where-Object { 
-                $_.ComputerName -eq $computer.Trim() -and $_.EligibleForDeletion -and -not $_.IsActiveSession 
-            }
-            $estimatedDeletions += $eligibleOnComputer.Count
+        # Temporarily suppress deletion so the enumeration pass only collects data
+        $script:SuppressDeletion = $true
+        
+        # Single enumeration pass - profiles are collected into $script:Results
+        $computerCount = $ComputerName.Count
+        for ($i = 0; $i -lt $computerCount; $i++) {
+            $percentComplete = [math]::Floor(($i / $computerCount) * 100)
+            Write-Progress -Activity "Enumerating Profiles" -Status "Scanning $($ComputerName[$i]) - $($i + 1) of $computerCount" -PercentComplete $percentComplete
+            Invoke-ComputerProcessing -ComputerName $ComputerName[$i].Trim()
         }
+        Write-Progress -Activity "Enumerating Profiles" -Completed
+        
+        $script:SuppressDeletion = $false
+        
+        # Count eligible profiles from the collected results
+        $eligibleProfiles = $script:Results | Where-Object { $_.EligibleForDeletion -and -not $_.IsActiveSession }
+        $estimatedDeletions = $eligibleProfiles.Count
         
         # Mass deletion warning threshold
         if ($estimatedDeletions -gt 50) {
@@ -3017,15 +3373,38 @@ process {
             }
         }
         
-        # Reset counters for actual deletion pass
-        $script:Results.Clear()
-        $script:TotalProfilesProcessed = 0
-        $script:TotalProfilesDeleted = 0
-        $script:TotalSpaceFreed = 0
+        # Perform deletions on already-collected results (no second scan needed)
+        foreach ($prof in $eligibleProfiles) {
+            $targetDesc = "Delete profile for '$($prof.UserName)' on '$($prof.ComputerName)' ($($prof.AgeInDays) days old, $($prof.SizeFormatted))"
+            if ($PSCmdlet.ShouldProcess($targetDesc, 'Delete User Profile')) {
+                # Backup profile before deletion if requested
+                $backupSuccess = $true
+                if ($BackupPath) {
+                    $backupSuccess = Backup-Profile -SourcePath $prof.ProfilePath -UserName $prof.UserName
+                }
+                
+                if ($backupSuccess) {
+                    if (Remove-UserProfile -ComputerName $prof.ComputerName -SID $prof.SID -ProfilePath $prof.ProfilePath -UserName $prof.UserName) {
+                        $prof.Deleted = $true
+                        $script:TotalProfilesDeleted++
+                        $script:TotalSpaceFreed += $prof.SizeBytes
+                        Write-EventLogEntry -Message "Deleted profile: $($prof.UserName) on $($prof.ComputerName) ($($prof.SizeFormatted))" -EntryType Information -EventId 1010
+                    }
+                    else {
+                        $prof.Error = 'Deletion failed'
+                        Write-EventLogEntry -Message "Failed to delete profile: $($prof.UserName) on $($prof.ComputerName)" -EntryType Error -EventId 1011
+                    }
+                }
+                else {
+                    $prof.Error = 'Backup failed - deletion cancelled'
+                    Write-DPLog -Message "Deletion cancelled for $($prof.UserName) - backup failed" -Level 'ERROR'
+                }
+            }
+        }
     }
     
     # Interactive mode processing
-    if ($Interactive) {
+    elseif ($Interactive) {
         foreach ($computer in $validComputers) {
             Invoke-ComputerProcessing -ComputerName $computer
         }
@@ -3060,13 +3439,90 @@ process {
         }
     }
     elseif ($UseParallel -and $ComputerName.Count -gt 1) {
-        # Parallel processing for multiple computers
-        $ComputerName | ForEach-Object -Parallel {
-            # Note: In parallel mode, we need to handle logging carefully
-            $comp = $_
-            # Simplified parallel processing - log to file only
-            Invoke-ComputerProcessing -ComputerName $comp.Trim()
-        } -ThrottleLimit $ThrottleLimit
+        # Parallel processing using runspace pool (PS 5.1 compatible)
+        # ForEach-Object -Parallel requires PS 7+ and doesn't share script scope,
+        # so we use a RunspacePool with jobs that each invoke the script per-computer.
+        $runspacePool = [runspacefactory]::CreateRunspacePool(1, $ThrottleLimit)
+        $runspacePool.Open()
+        $jobs = [System.Collections.Generic.List[object]]::new()
+
+        $parallelScript = {
+            param($ScriptPath, $Computer, $Params)
+            # Re-invoke the script for a single computer in list mode (no -Delete)
+            # to collect profile data; deletion happens in the main thread below.
+            $splatParams = @{
+                ComputerName = $Computer
+                DaysInactive = $Params.DaysInactive
+                AgeCalculation = $Params.AgeCalculation
+                ProfileType = $Params.ProfileType
+                Quiet = $true
+            }
+            if ($Params.Include) { $splatParams['Include'] = $Params.Include }
+            if ($Params.Exclude) { $splatParams['Exclude'] = $Params.Exclude }
+            if ($Params.ShowSpace) { $splatParams['ShowSpace'] = $true }
+            if ($Params.LogPath) { $splatParams['LogPath'] = $Params.LogPath }
+            if ($Params.UnloadHives) { $splatParams['UnloadHives'] = $true }
+            if ($Params.IncludeCorrupted) { $splatParams['IncludeCorrupted'] = $true }
+            if ($Params.IncludeSystemProfiles) { $splatParams['IncludeSystemProfiles'] = $true }
+            if ($Params.IncludeSpecialProfiles) { $splatParams['IncludeSpecialProfiles'] = $true }
+            if ($Params.MinProfileSizeMB) { $splatParams['MinProfileSizeMB'] = $Params.MinProfileSizeMB }
+            if ($Params.MaxProfileSizeMB) { $splatParams['MaxProfileSizeMB'] = $Params.MaxProfileSizeMB }
+            if ($Params.Detailed) { $splatParams['Detailed'] = $true }
+            & $ScriptPath @splatParams
+        }
+
+        $parallelParams = @{
+            DaysInactive = $DaysInactive
+            AgeCalculation = $AgeCalculation
+            ProfileType = $ProfileType
+            Include = $Include
+            Exclude = $Exclude
+            ShowSpace = [bool]$ShowSpace
+            LogPath = $LogPath
+            UnloadHives = [bool]$UnloadHives
+            IncludeCorrupted = [bool]$IncludeCorrupted
+            IncludeSystemProfiles = [bool]$IncludeSystemProfiles
+            IncludeSpecialProfiles = [bool]$IncludeSpecialProfiles
+            MinProfileSizeMB = $MinProfileSizeMB
+            MaxProfileSizeMB = $MaxProfileSizeMB
+            Detailed = [bool]$Detailed
+        }
+
+        foreach ($computer in $ComputerName) {
+            $ps = [powershell]::Create().AddScript($parallelScript).AddArgument($PSCommandPath).AddArgument($computer.Trim()).AddArgument($parallelParams)
+            $ps.RunspacePool = $runspacePool
+            $jobs.Add([PSCustomObject]@{ PowerShell = $ps; Handle = $ps.BeginInvoke() })
+        }
+
+        # Collect results from all runspaces
+        $jobIndex = 0
+        foreach ($job in $jobs) {
+            $jobIndex++
+            Write-Progress -Activity "Parallel Processing" -Status "Collecting results $jobIndex of $($jobs.Count)" -PercentComplete ([math]::Floor(($jobIndex / $jobs.Count) * 100))
+            try {
+                $jobResults = $job.PowerShell.EndInvoke($job.Handle)
+                if ($jobResults) {
+                    foreach ($r in $jobResults) {
+                        $script:Results.Add($r)
+                        $script:TotalProfilesProcessed++
+                        if ($r.Deleted) {
+                            $script:TotalProfilesDeleted++
+                            $script:TotalSpaceFreed += $r.SizeBytes
+                        }
+                    }
+                }
+            }
+            catch {
+                Write-DPLog -Message "Parallel job failed: $($_.Exception.Message)" -Level 'ERROR'
+            }
+            finally {
+                $job.PowerShell.Dispose()
+            }
+        }
+        Write-Progress -Activity "Parallel Processing" -Completed
+
+        $runspacePool.Close()
+        $runspacePool.Dispose()
     }
     else {
         # Standard sequential processing with progress bar
@@ -3081,6 +3537,7 @@ process {
 }
 
 end {
+    if ($script:UIMode) { return }
     Show-Summary
     
     # Preview mode completion message

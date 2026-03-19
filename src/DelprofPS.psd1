@@ -1,6 +1,6 @@
 @{
     # Module manifest for DelprofPS
-    RootModule = 'delprofPS.ps1'
+    RootModule = '..\delprofPS.ps1'
     ModuleVersion = '2.0.0'
     GUID = 'a3e4b8c1-2d5f-4e6a-9b7c-8d1e0f2a3b4c'
     Author = 'Karl Lawrence'
@@ -12,7 +12,7 @@
     PowerShellVersion = '5.1'
 
     # Functions to export
-    FunctionsToExport = @('Show-DelprofPSGUI')
+    FunctionsToExport = @()
 
     # Cmdlets to export
     CmdletsToExport = @()
@@ -28,12 +28,12 @@
 
     # Files to package with this module
     FileList = @(
-        'delprofPS.ps1',
-        'DelprofPS.config.json',
-        'DelprofPS.Tests.ps1',
-        'README.md',
-        'CHANGELOG.md',
-        'LICENSE'
+        '..\delprofPS.ps1',
+        '..\config\DelprofPS.config.json',
+        '..\tests\DelprofPS.Tests.ps1',
+        '..\docs\README.md',
+        '..\docs\CHANGELOG.md',
+        '..\docs\LICENSE'
     )
 
     # Private data / PSGallery metadata
