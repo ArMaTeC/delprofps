@@ -827,7 +827,7 @@ begin {
                                         # Use robocopy /L (list-only) for fast native size calculation, /XJ skips junctions
                                         $totalSize = 0
                                         try {
-                                            $roboOut = & robocopy $profilePath 'C:\RobocopyNull' /L /E /BYTES /NJH /NJS /NC /NDL /NFL /XJ /R:0 /W:0 2>&1
+                                            $roboOut = & robocopy $profilePath 'C:\RobocopyNull' /L /E /BYTES /NJH /NC /NDL /NFL /XJ /R:0 /W:0 2>&1
                                             $roboText = ($roboOut | Out-String)
                                             if ($roboText -match 'Bytes\s*:\s*(\d+)') {
                                                 $totalSize = [long]$Matches[1]
@@ -1957,7 +1957,7 @@ begin {
         Write-DPLog -Message "    [Size] Calculating folder size for $Path via robocopy /L /XJ..." -Level 'DEBUG'
         try {
             $totalSize = [long]0
-            $roboOut = & robocopy $Path 'C:\RobocopyNull' /L /E /BYTES /NJH /NJS /NC /NDL /NFL /XJ /R:0 /W:0 2>&1
+            $roboOut = & robocopy $Path 'C:\RobocopyNull' /L /E /BYTES /NJH /NC /NDL /NFL /XJ /R:0 /W:0 2>&1
             $roboText = ($roboOut | Out-String)
             if ($roboText -match 'Bytes\s*:\s*(\d+)') {
                 $totalSize = [long]$Matches[1]
