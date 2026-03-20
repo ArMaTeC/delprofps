@@ -361,6 +361,46 @@ param (
 )
 
 begin {
+
+    # Auto-elevate if not running as Administrator
+    if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        Write-Warning "Administrator privileges required. Relaunching as Administrator..."
+    
+        $argList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$PSCommandPath`"")
+        $newArgs = @()
+    
+        # Safely pass bound parameters
+        foreach ($key in $PSBoundParameters.Keys) {
+            $val = $PSBoundParameters[$key]
+            if ($val -is [switch]) {
+                if ($val.IsPresent) { $newArgs += "-$key" }
+            }
+            elseif ($val -is [array]) {
+                $newArgs += "-$key"
+                $newArgs += ($val -join ',')
+            }
+            else {
+                $newArgs += "-$key"
+                $newArgs += "`"$val`""
+            }
+        }
+    
+        # Safely pass unbound arguments
+        if ($args) {
+            $newArgs += $args
+        }
+    
+        $argList += $newArgs
+    
+        try {
+            Start-Process powershell.exe -Verb RunAs -ArgumentList $argList -ErrorAction Stop
+        }
+        catch {
+            Write-Error "Failed to elevate to Administrator: $($_.Exception.Message)"
+        }
+        exit 0
+    }
+    
     #region GUI Function
     function Show-DelprofPSGUI {
         <#
@@ -815,15 +855,15 @@ begin {
         
         # Event Handler: Throttle Slider
         $controls['sldThrottle'].Add_ValueChanged({
-            $controls['txtThrottleValue'].Text = $controls['sldThrottle'].Value
-            & $script:WriteGuiOutput -Text "[Setting] Throttle limit changed to $($controls['sldThrottle'].Value)" -Color 'Gray'
-        })
+                $controls['txtThrottleValue'].Text = $controls['sldThrottle'].Value
+                & $script:WriteGuiOutput -Text "[Setting] Throttle limit changed to $($controls['sldThrottle'].Value)" -Color 'Gray'
+            })
         
         # Event Handler: Days Slider
         $controls['sldDaysInactive'].Add_ValueChanged({
-            $controls['txtDaysValue'].Text = "$($controls['sldDaysInactive'].Value) days"
-            & $script:WriteGuiOutput -Text "[Setting] Days inactive changed to $($controls['sldDaysInactive'].Value)" -Color 'Gray'
-        })
+                $controls['txtDaysValue'].Text = "$($controls['sldDaysInactive'].Value) days"
+                & $script:WriteGuiOutput -Text "[Setting] Days inactive changed to $($controls['sldDaysInactive'].Value)" -Color 'Gray'
+            })
         
         # Profile list data source
         $script:profileList = [System.Collections.ObjectModel.ObservableCollection[PSObject]]::new()
@@ -853,158 +893,162 @@ begin {
             $runspace.SessionStateProxy.SetVariable('localComputerName', $env:COMPUTERNAME)
             
             $ps = [powershell]::Create().AddScript({
-                $profileListPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList"
-                $isLocal = ($TargetComputer -eq $localComputerName -or $TargetComputer -eq 'localhost' -or $TargetComputer -eq '.')
-                $systemNames = @('Default', 'Default User', 'Public', 'SYSTEM', 'LocalService', 'NetworkService', 'systemprofile')
-                $results = [System.Collections.Generic.List[object]]::new()
-                $errorMessages = [System.Collections.Generic.List[string]]::new()
+                    $profileListPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList"
+                    $isLocal = ($TargetComputer -eq $localComputerName -or $TargetComputer -eq 'localhost' -or $TargetComputer -eq '.')
+                    $systemNames = @('Default', 'Default User', 'Public', 'SYSTEM', 'LocalService', 'NetworkService', 'systemprofile')
+                    $results = [System.Collections.Generic.List[object]]::new()
+                    $errorMessages = [System.Collections.Generic.List[string]]::new()
                 
-                Write-Host "[Scan] Starting profile scan on $TargetComputer (local=$isLocal)..."
+                    Write-Host "[Scan] Starting profile scan on $TargetComputer (local=$isLocal)..."
                 
-                try {
-                    if ($isLocal) {
-                        Write-Host "[Scan] Reading local registry ProfileList..."
-                        $profileKeys = Get-ChildItem $profileListPath -ErrorAction Stop |
+                    try {
+                        if ($isLocal) {
+                            Write-Host "[Scan] Reading local registry ProfileList..."
+                            $profileKeys = Get-ChildItem $profileListPath -ErrorAction Stop |
                             Where-Object { $_.PSChildName -match '^S-1-5-21' }
                         
-                        $totalKeys = @($profileKeys).Count
-                        Write-Host "[Scan] Found $totalKeys profile SIDs to process"
-                        $current = 0
+                            $totalKeys = @($profileKeys).Count
+                            Write-Host "[Scan] Found $totalKeys profile SIDs to process"
+                            $current = 0
                         
-                        foreach ($key in $profileKeys) {
-                            $current++
-                            try {
-                                $props = Get-ItemProperty $key.PSPath
-                                $sid = $key.PSChildName
-                                $profilePath = $props.ProfileImagePath
-                                
-                                Write-Host "[Scan] ($current/$totalKeys) Processing SID $sid..."
-                                
-                                $userName = $null
+                            foreach ($key in $profileKeys) {
+                                $current++
                                 try {
-                                    $secId = New-Object System.Security.Principal.SecurityIdentifier($sid)
-                                    $ntAccount = $secId.Translate([System.Security.Principal.NTAccount])
-                                    $userName = $ntAccount.Value
-                                } catch {
-                                    $userName = "(Unresolvable)"
-                                }
+                                    $props = Get-ItemProperty $key.PSPath
+                                    $sid = $key.PSChildName
+                                    $profilePath = $props.ProfileImagePath
                                 
-                                Write-Host "[Scan]   User: $userName | Path: $profilePath"
+                                    Write-Host "[Scan] ($current/$totalKeys) Processing SID $sid..."
                                 
-                                $sizeMB = "N/A"
-                                $lastMod = "N/A"
-                                if ($profilePath -and (Test-Path $profilePath)) {
-                                    Write-Host "[Scan]   Calculating folder size..."
+                                    $userName = $null
                                     try {
-                                        $dirInfo = Get-Item $profilePath -ErrorAction SilentlyContinue
-                                        $lastMod = $dirInfo.LastWriteTime.ToString("yyyy-MM-dd HH:mm")
-                                        $ntUserDat = Join-Path $profilePath "NTUSER.DAT"
-                                        if (Test-Path $ntUserDat) {
-                                            $lastMod = (Get-Item $ntUserDat -Force -ErrorAction SilentlyContinue).LastWriteTime.ToString("yyyy-MM-dd HH:mm")
-                                        }
-                                        # Use robocopy /L (list-only) for fast native size calculation, /XJ skips junctions
-                                        $totalSize = 0
-                                        try {
-                                            $roboOut = & robocopy $profilePath 'C:\RobocopyNull' /L /E /BYTES /NJH /NC /NDL /NFL /XJ /R:0 /W:0 2>&1
-                                            $roboText = ($roboOut | Out-String)
-                                            if ($roboText -match 'Bytes\s*:\s*(\d+)') {
-                                                $totalSize = [long]$Matches[1]
-                                            }
-                                        } catch {
-                                            $totalSize = 0
-                                        }
-                                        $sizeMB = [math]::Round($totalSize / 1MB, 1)
-                                        Write-Host "[Scan]   Size: $sizeMB MB | Last modified: $lastMod"
-                                    } catch {
-                                        $sizeMB = "Error"
-                                        Write-Host "[Scan]   Size calculation error: $_"
+                                        $secId = New-Object System.Security.Principal.SecurityIdentifier($sid)
+                                        $ntAccount = $secId.Translate([System.Security.Principal.NTAccount])
+                                        $userName = $ntAccount.Value
                                     }
-                                }
-                                else {
-                                    Write-Host "[Scan]   Path not found or missing"
-                                }
+                                    catch {
+                                        $userName = "(Unresolvable)"
+                                    }
                                 
-                                $status = "OK"
-                                $shortName = if ($userName) { ($userName -split '\\')[-1] } else { "" }
-                                if ($systemNames -contains $shortName) {
-                                    $status = "System"
-                                }
-                                elseif (-not $profilePath -or -not (Test-Path $profilePath)) {
-                                    $status = "Orphaned"
-                                }
+                                    Write-Host "[Scan]   User: $userName | Path: $profilePath"
                                 
-                                Write-Host "[Scan]   Status: $status"
+                                    $sizeMB = "N/A"
+                                    $lastMod = "N/A"
+                                    if ($profilePath -and (Test-Path $profilePath)) {
+                                        Write-Host "[Scan]   Calculating folder size..."
+                                        try {
+                                            $dirInfo = Get-Item $profilePath -ErrorAction SilentlyContinue
+                                            $lastMod = $dirInfo.LastWriteTime.ToString("yyyy-MM-dd HH:mm")
+                                            $ntUserDat = Join-Path $profilePath "NTUSER.DAT"
+                                            if (Test-Path $ntUserDat) {
+                                                $lastMod = (Get-Item $ntUserDat -Force -ErrorAction SilentlyContinue).LastWriteTime.ToString("yyyy-MM-dd HH:mm")
+                                            }
+                                            # Use robocopy /L (list-only) for fast native size calculation, /XJ skips junctions
+                                            $totalSize = 0
+                                            try {
+                                                $roboOut = & robocopy $profilePath 'C:\RobocopyNull' /L /E /BYTES /NJH /NC /NDL /NFL /XJ /R:0 /W:0 2>&1
+                                                $roboText = ($roboOut | Out-String)
+                                                if ($roboText -match 'Bytes\s*:\s*(\d+)') {
+                                                    $totalSize = [long]$Matches[1]
+                                                }
+                                            }
+                                            catch {
+                                                $totalSize = 0
+                                            }
+                                            $sizeMB = [math]::Round($totalSize / 1MB, 1)
+                                            Write-Host "[Scan]   Size: $sizeMB MB | Last modified: $lastMod"
+                                        }
+                                        catch {
+                                            $sizeMB = "Error"
+                                            Write-Host "[Scan]   Size calculation error: $_"
+                                        }
+                                    }
+                                    else {
+                                        Write-Host "[Scan]   Path not found or missing"
+                                    }
                                 
-                                $results.Add([PSCustomObject]@{
-                                    Selected = $false
-                                    UserName = $userName
-                                    ProfilePath = $profilePath
-                                    SID = $sid
-                                    SizeMB = $sizeMB
-                                    LastModified = $lastMod
-                                    Status = $status
-                                })
-                            }
-                            catch {
-                                $errorMessages.Add("Error reading profile $($key.PSChildName): $_")
-                                Write-Host "[Scan]   ERROR: $_"
+                                    $status = "OK"
+                                    $shortName = if ($userName) { ($userName -split '\\')[-1] } else { "" }
+                                    if ($systemNames -contains $shortName) {
+                                        $status = "System"
+                                    }
+                                    elseif (-not $profilePath -or -not (Test-Path $profilePath)) {
+                                        $status = "Orphaned"
+                                    }
+                                
+                                    Write-Host "[Scan]   Status: $status"
+                                
+                                    $results.Add([PSCustomObject]@{
+                                            Selected     = $false
+                                            UserName     = $userName
+                                            ProfilePath  = $profilePath
+                                            SID          = $sid
+                                            SizeMB       = $sizeMB
+                                            LastModified = $lastMod
+                                            Status       = $status
+                                        })
+                                }
+                                catch {
+                                    $errorMessages.Add("Error reading profile $($key.PSChildName): $_")
+                                    Write-Host "[Scan]   ERROR: $_"
+                                }
                             }
                         }
-                    }
-                    else {
-                        Write-Host "[Scan] Connecting to remote registry on $TargetComputer via WMI..."
-                        $regProv = Get-WmiObject -ComputerName $TargetComputer -Class StdRegProv -Namespace 'root\default' -ErrorAction Stop
-                        $enumResult = $regProv.EnumKey(2147483650, 'SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList')
-                        $sids = $enumResult.sNames | Where-Object { $_ -match '^S-1-5-21' }
+                        else {
+                            Write-Host "[Scan] Connecting to remote registry on $TargetComputer via WMI..."
+                            $regProv = Get-WmiObject -ComputerName $TargetComputer -Class StdRegProv -Namespace 'root\default' -ErrorAction Stop
+                            $enumResult = $regProv.EnumKey(2147483650, 'SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList')
+                            $sids = $enumResult.sNames | Where-Object { $_ -match '^S-1-5-21' }
                         
-                        $totalSids = @($sids).Count
-                        Write-Host "[Scan] Found $totalSids profile SIDs on remote $TargetComputer"
-                        $current = 0
+                            $totalSids = @($sids).Count
+                            Write-Host "[Scan] Found $totalSids profile SIDs on remote $TargetComputer"
+                            $current = 0
                         
-                        foreach ($sid in $sids) {
-                            $current++
-                            Write-Host "[Scan] ($current/$totalSids) Processing remote SID $sid..."
-                            try {
-                                $pathResult = $regProv.GetStringValue(2147483650, "SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid", 'ProfileImagePath')
-                                $profilePath = $pathResult.sValue
-                                if ($profilePath) { $profilePath = $profilePath -replace '%SystemDrive%', 'C:' }
-                                
-                                $userName = $null
+                            foreach ($sid in $sids) {
+                                $current++
+                                Write-Host "[Scan] ($current/$totalSids) Processing remote SID $sid..."
                                 try {
-                                    $secId = New-Object System.Security.Principal.SecurityIdentifier($sid)
-                                    $ntAccount = $secId.Translate([System.Security.Principal.NTAccount])
-                                    $userName = $ntAccount.Value
-                                } catch {
-                                    $userName = "(Unresolvable)"
+                                    $pathResult = $regProv.GetStringValue(2147483650, "SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid", 'ProfileImagePath')
+                                    $profilePath = $pathResult.sValue
+                                    if ($profilePath) { $profilePath = $profilePath -replace '%SystemDrive%', 'C:' }
+                                
+                                    $userName = $null
+                                    try {
+                                        $secId = New-Object System.Security.Principal.SecurityIdentifier($sid)
+                                        $ntAccount = $secId.Translate([System.Security.Principal.NTAccount])
+                                        $userName = $ntAccount.Value
+                                    }
+                                    catch {
+                                        $userName = "(Unresolvable)"
+                                    }
+                                
+                                    Write-Host "[Scan]   User: $userName | Path: $profilePath"
+                                
+                                    $results.Add([PSCustomObject]@{
+                                            Selected     = $false
+                                            UserName     = $userName
+                                            ProfilePath  = $profilePath
+                                            SID          = $sid
+                                            SizeMB       = "Remote"
+                                            LastModified = "Remote"
+                                            Status       = "OK"
+                                        })
                                 }
-                                
-                                Write-Host "[Scan]   User: $userName | Path: $profilePath"
-                                
-                                $results.Add([PSCustomObject]@{
-                                    Selected = $false
-                                    UserName = $userName
-                                    ProfilePath = $profilePath
-                                    SID = $sid
-                                    SizeMB = "Remote"
-                                    LastModified = "Remote"
-                                    Status = "OK"
-                                })
-                            }
-                            catch {
-                                $errorMessages.Add("Error reading remote profile $sid`: $_")
-                                Write-Host "[Scan]   ERROR: $_"
+                                catch {
+                                    $errorMessages.Add("Error reading remote profile $sid`: $_")
+                                    Write-Host "[Scan]   ERROR: $_"
+                                }
                             }
                         }
                     }
-                }
-                catch {
-                    $errorMessages.Add("Failed to enumerate profiles: $($_.Exception.Message)")
-                    Write-Host "[Scan] FATAL: $($_.Exception.Message)"
-                }
+                    catch {
+                        $errorMessages.Add("Failed to enumerate profiles: $($_.Exception.Message)")
+                        Write-Host "[Scan] FATAL: $($_.Exception.Message)"
+                    }
                 
-                Write-Host "[Scan] Scan complete. Found $($results.Count) profiles."
-                return @{ Results = $results; Errors = $errorMessages; Computer = $TargetComputer }
-            })
+                    Write-Host "[Scan] Scan complete. Found $($results.Count) profiles."
+                    return @{ Results = $results; Errors = $errorMessages; Computer = $TargetComputer }
+                })
             
             $ps.Runspace = $runspace
             $asyncResult = $ps.BeginInvoke()
@@ -1017,698 +1061,707 @@ begin {
             $script:activeRefreshTimer = $timer
             $timer.Interval = [TimeSpan]::FromMilliseconds(150)
             $timer.Add_Tick({
-                try {
-                    # Guard against stale timer from a previous GUI session
-                    if ($null -eq $ps -or $null -eq $asyncResult) { $timer.Stop(); return }
+                    try {
+                        # Guard against stale timer from a previous GUI session
+                        if ($null -eq $ps -or $null -eq $asyncResult) { $timer.Stop(); return }
                     
-                    # Drain Information stream for live progress (write directly via $controlsRef to avoid scope issues)
-                    while ($pollState.InfoIdx -lt $ps.Streams.Information.Count) {
-                        $msg = "$($ps.Streams.Information[$pollState.InfoIdx].MessageData)"
-                        $controlsRef['txtOutput'].AppendText("[$(Get-Date -Format 'HH:mm:ss')] $msg`r`n")
-                        $controlsRef['txtOutput'].ScrollToEnd()
-                        $pollState.InfoIdx++
-                    }
+                        # Drain Information stream for live progress (write directly via $controlsRef to avoid scope issues)
+                        while ($pollState.InfoIdx -lt $ps.Streams.Information.Count) {
+                            $msg = "$($ps.Streams.Information[$pollState.InfoIdx].MessageData)"
+                            $controlsRef['txtOutput'].AppendText("[$(Get-Date -Format 'HH:mm:ss')] $msg`r`n")
+                            $controlsRef['txtOutput'].ScrollToEnd()
+                            $pollState.InfoIdx++
+                        }
                     
-                    # Update scanning status with count
-                    $scannedSoFar = $ps.Streams.Information | Where-Object { "$($_.MessageData)" -match '^\[Scan\] \(\d+' }
-                    if ($scannedSoFar) {
-                        $controlsRef['txtProfileCount'].Text = "Scanning... ($(@($scannedSoFar).Count) processed)"
-                    }
+                        # Update scanning status with count
+                        $scannedSoFar = $ps.Streams.Information | Where-Object { "$($_.MessageData)" -match '^\[Scan\] \(\d+' }
+                        if ($scannedSoFar) {
+                            $controlsRef['txtProfileCount'].Text = "Scanning... ($(@($scannedSoFar).Count) processed)"
+                        }
                     
-                    if ($asyncResult.IsCompleted) {
-                        $timer.Stop()
-                        $script:activeRefreshTimer = $null
-                        try {
-                            $output = $ps.EndInvoke($asyncResult)
-                            $data = $output | Select-Object -Last 1
+                        if ($asyncResult.IsCompleted) {
+                            $timer.Stop()
+                            $script:activeRefreshTimer = $null
+                            try {
+                                $output = $ps.EndInvoke($asyncResult)
+                                $data = $output | Select-Object -Last 1
                             
-                            if ($data.Errors) {
-                                foreach ($err in $data.Errors) {
-                                    $controlsRef['txtOutput'].AppendText("[$(Get-Date -Format 'HH:mm:ss')] [ERROR] $err`r`n")
+                                if ($data.Errors) {
+                                    foreach ($err in $data.Errors) {
+                                        $controlsRef['txtOutput'].AppendText("[$(Get-Date -Format 'HH:mm:ss')] [ERROR] $err`r`n")
+                                        $controlsRef['txtOutput'].ScrollToEnd()
+                                    }
+                                }
+                                if ($data.Results) {
+                                    foreach ($item in $data.Results) {
+                                        $profileListRef.Add($item)
+                                    }
+                                    $controlsRef['txtProfileCount'].Text = "$($data.Results.Count) profiles found"
+                                    $controlsRef['txtOutput'].AppendText("[$(Get-Date -Format 'HH:mm:ss')] Found $($data.Results.Count) profiles on $($data.Computer)`r`n")
+                                    $controlsRef['txtOutput'].ScrollToEnd()
+                                }
+                                else {
+                                    $controlsRef['txtProfileCount'].Text = "0 profiles found"
+                                    $controlsRef['txtOutput'].AppendText("[$(Get-Date -Format 'HH:mm:ss')] No profiles returned`r`n")
                                     $controlsRef['txtOutput'].ScrollToEnd()
                                 }
                             }
-                            if ($data.Results) {
-                                foreach ($item in $data.Results) {
-                                    $profileListRef.Add($item)
-                                }
-                                $controlsRef['txtProfileCount'].Text = "$($data.Results.Count) profiles found"
-                                $controlsRef['txtOutput'].AppendText("[$(Get-Date -Format 'HH:mm:ss')] Found $($data.Results.Count) profiles on $($data.Computer)`r`n")
+                            catch {
+                                $controlsRef['txtProfileCount'].Text = "Error scanning profiles"
+                                $controlsRef['txtOutput'].AppendText("[$(Get-Date -Format 'HH:mm:ss')] Scan error: $($_.Exception.Message)`r`n")
                                 $controlsRef['txtOutput'].ScrollToEnd()
                             }
-                            else {
-                                $controlsRef['txtProfileCount'].Text = "0 profiles found"
-                                $controlsRef['txtOutput'].AppendText("[$(Get-Date -Format 'HH:mm:ss')] No profiles returned`r`n")
-                                $controlsRef['txtOutput'].ScrollToEnd()
+                            finally {
+                                $ps.Dispose()
+                                $runspace.Close()
+                                $runspace.Dispose()
+                                $controlsRef['btnRefreshProfiles'].IsEnabled = $true
+                                $controlsRef['progressBar'].Visibility = "Collapsed"
                             }
-                        }
-                        catch {
-                            $controlsRef['txtProfileCount'].Text = "Error scanning profiles"
-                            $controlsRef['txtOutput'].AppendText("[$(Get-Date -Format 'HH:mm:ss')] Scan error: $($_.Exception.Message)`r`n")
-                            $controlsRef['txtOutput'].ScrollToEnd()
-                        }
-                        finally {
-                            $ps.Dispose()
-                            $runspace.Close()
-                            $runspace.Dispose()
-                            $controlsRef['btnRefreshProfiles'].IsEnabled = $true
-                            $controlsRef['progressBar'].Visibility = "Collapsed"
                         }
                     }
-                }
-                catch {
-                    # Log the error visibly, then clean up
-                    try {
-                        $controlsRef['txtOutput'].AppendText("[$(Get-Date -Format 'HH:mm:ss')] [Timer Error] $($_.Exception.Message)`r`n")
-                        $controlsRef['txtOutput'].ScrollToEnd()
-                    } catch {}
-                    try { $timer.Stop() } catch {}
-                    $script:activeRefreshTimer = $null
-                    $controlsRef['btnRefreshProfiles'].IsEnabled = $true
-                    $controlsRef['progressBar'].Visibility = "Collapsed"
-                }
-            }.GetNewClosure())
+                    catch {
+                        # Log the error visibly, then clean up
+                        try {
+                            $controlsRef['txtOutput'].AppendText("[$(Get-Date -Format 'HH:mm:ss')] [Timer Error] $($_.Exception.Message)`r`n")
+                            $controlsRef['txtOutput'].ScrollToEnd()
+                        }
+                        catch {}
+                        try { $timer.Stop() } catch {}
+                        $script:activeRefreshTimer = $null
+                        $controlsRef['btnRefreshProfiles'].IsEnabled = $true
+                        $controlsRef['progressBar'].Visibility = "Collapsed"
+                    }
+                }.GetNewClosure())
             $timer.Start()
         }
         
         # Event Handler: Refresh Profiles
         $controls['btnRefreshProfiles'].Add_Click({
-            & $script:WriteGuiOutput -Text '[Button] Refresh Profiles clicked' -Color 'Cyan'
-            $targetComputer = $env:COMPUTERNAME
-            if ($controls['rbRemoteComputers'].IsChecked -and $controls['txtComputerList'].Text) {
-                $computers = $controls['txtComputerList'].Text -split "[\r\n,]+" | ForEach-Object { $_.Trim() } | Where-Object { $_ }
-                if ($computers.Count -gt 0) { $targetComputer = $computers[0] }
-            }
-            & $script:RefreshProfileList -TargetComputer $targetComputer
-        })
+                & $script:WriteGuiOutput -Text '[Button] Refresh Profiles clicked' -Color 'Cyan'
+                $targetComputer = $env:COMPUTERNAME
+                if ($controls['rbRemoteComputers'].IsChecked -and $controls['txtComputerList'].Text) {
+                    $computers = $controls['txtComputerList'].Text -split "[\r\n,]+" | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+                    if ($computers.Count -gt 0) { $targetComputer = $computers[0] }
+                }
+                & $script:RefreshProfileList -TargetComputer $targetComputer
+            })
         
         # Event Handler: Select All
         $controls['btnSelectAll'].Add_Click({
-            & $script:WriteGuiOutput -Text "[Button] Select All clicked - selecting $($script:profileList.Count) profiles" -Color 'Cyan'
-            foreach ($item in $script:profileList) {
-                $item.Selected = $true
-            }
-            $controls['dgProfiles'].Items.Refresh()
-            & $script:WriteGuiOutput -Text "[Select] All $($script:profileList.Count) profiles selected" -Color 'Gray'
-        })
+                & $script:WriteGuiOutput -Text "[Button] Select All clicked - selecting $($script:profileList.Count) profiles" -Color 'Cyan'
+                foreach ($item in $script:profileList) {
+                    $item.Selected = $true
+                }
+                $controls['dgProfiles'].Items.Refresh()
+                & $script:WriteGuiOutput -Text "[Select] All $($script:profileList.Count) profiles selected" -Color 'Gray'
+            })
         
         # Event Handler: Deselect All
         $controls['btnDeselectAll'].Add_Click({
-            & $script:WriteGuiOutput -Text '[Button] Deselect All clicked' -Color 'Cyan'
-            foreach ($item in $script:profileList) {
-                $item.Selected = $false
-            }
-            $controls['dgProfiles'].Items.Refresh()
-            & $script:WriteGuiOutput -Text '[Select] All profiles deselected' -Color 'Gray'
-        })
+                & $script:WriteGuiOutput -Text '[Button] Deselect All clicked' -Color 'Cyan'
+                foreach ($item in $script:profileList) {
+                    $item.Selected = $false
+                }
+                $controls['dgProfiles'].Items.Refresh()
+                & $script:WriteGuiOutput -Text '[Select] All profiles deselected' -Color 'Gray'
+            })
         
         # Event Handler: Force Remove Selected
         $controls['btnForceRemove'].Add_Click({
-            & $script:WriteGuiOutput -Text '[Button] Force Remove Selected clicked' -Color 'Cyan'
-            if ($script:guiState.Running) {
-                & $script:WriteGuiOutput -Text '[Force Remove] Blocked - another operation is already running' -Color 'Yellow'
-                [System.Windows.MessageBox]::Show("An operation is already running. Please wait.", "Busy", "OK", "Warning")
-                return
-            }
-            
-            $selected = @($script:profileList | Where-Object { $_.Selected -eq $true })
-            & $script:WriteGuiOutput -Text "[Force Remove] Found $($selected.Count) selected profile(s)" -Color 'Gray'
-            if ($selected.Count -eq 0) {
-                & $script:WriteGuiOutput -Text '[Force Remove] No profiles selected - aborting' -Color 'Yellow'
-                [System.Windows.MessageBox]::Show("No profiles selected. Use the checkboxes to select profiles to remove.", "No Selection", "OK", "Information")
-                return
-            }
-            
-            $userList = ($selected | ForEach-Object { "$($_.UserName) ($($_.SID))" }) -join "`n"
-            $confirm = [System.Windows.MessageBox]::Show(
-                "Are you sure you want to FORCE REMOVE the following $($selected.Count) profile(s)?`n`n$userList`n`nThis action CANNOT be undone!",
-                "Confirm Force Removal",
-                "YesNo",
-                "Warning"
-            )
-            
-            if ($confirm -ne 'Yes') {
-                & $script:WriteGuiOutput -Text '[Force Remove] User cancelled confirmation dialog' -Color 'Yellow'
-                return
-            }
-            & $script:WriteGuiOutput -Text '[Force Remove] User confirmed - proceeding with removal' -Color 'Yellow'
-            
-            $script:guiState.Running = $true
-            $controls['btnForceRemove'].IsEnabled = $false
-            $controls['progressBar'].Visibility = "Visible"
-            $controls['progressBar'].IsIndeterminate = $true
-            
-            $targetComputer = $env:COMPUTERNAME
-            if ($controls['rbRemoteComputers'].IsChecked -and $controls['txtComputerList'].Text) {
-                $computers = $controls['txtComputerList'].Text -split "[\r\n,]+" | ForEach-Object { $_.Trim() } | Where-Object { $_ }
-                if ($computers.Count -gt 0) { $targetComputer = $computers[0] }
-            }
-            
-            $isLocal = ($targetComputer -eq $env:COMPUTERNAME -or $targetComputer -eq 'localhost' -or $targetComputer -eq '.')
-            $removedCount = 0
-            $failedCount = 0
-            $totalSelected = $selected.Count
-            $currentIndex = 0
-            
-            & $script:WriteGuiOutput -Text "Starting force removal of $totalSelected profile(s) on $targetComputer (local=$isLocal)" -Color "Cyan"
-            & $script:WriteGuiOutput -Text "---" -Color "Gray"
-            
-            foreach ($prof in $selected) {
-                $currentIndex++
-                & $script:WriteGuiOutput -Text "[$currentIndex/$totalSelected] Removing: $($prof.UserName) | SID: $($prof.SID)" -Color "Yellow"
-                & $script:WriteGuiOutput -Text "  Path: $($prof.ProfilePath) | Size: $($prof.SizeMB) MB | Status: $($prof.Status)" -Color "Gray"
-                [System.Windows.Forms.Application]::DoEvents()
-                
-                $success = $true
-                
-                # Step 1: Unload registry hive if loaded
-                & $script:WriteGuiOutput -Text "  Step 1/4: Checking registry hive..." -Color "Gray"
-                try {
-                    if ($isLocal) {
-                        $hiveLoaded = Test-Path "Registry::HKEY_USERS\$($prof.SID)"
-                        if ($hiveLoaded) {
-                            & $script:WriteGuiOutput -Text "  Hive loaded - unloading HKU\$($prof.SID)..." -Color "Gray"
-                            $null = & reg.exe unload "HKU\$($prof.SID)" 2>&1
-                            & $script:WriteGuiOutput -Text "  Hive unloaded." -Color "Gray"
-                        }
-                        else {
-                            & $script:WriteGuiOutput -Text "  Hive not loaded, skipping." -Color "Gray"
-                        }
-                    }
-                    else {
-                        & $script:WriteGuiOutput -Text "  Remote target - hive unload skipped." -Color "Gray"
-                    }
-                } catch {
-                    & $script:WriteGuiOutput -Text "  Warning: Could not unload hive: $_" -Color "Yellow"
+                & $script:WriteGuiOutput -Text '[Button] Force Remove Selected clicked' -Color 'Cyan'
+                if ($script:guiState.Running) {
+                    & $script:WriteGuiOutput -Text '[Force Remove] Blocked - another operation is already running' -Color 'Yellow'
+                    [System.Windows.MessageBox]::Show("An operation is already running. Please wait.", "Busy", "OK", "Warning")
+                    return
                 }
-                
-                # Step 2: Remove registry entry
-                & $script:WriteGuiOutput -Text "  Step 2/4: Removing ProfileList registry key..." -Color "Gray"
-                try {
-                    if ($isLocal) {
-                        $regKey = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$($prof.SID)"
-                        if (Test-Path $regKey) {
-                            Remove-Item -Path $regKey -Recurse -Force -ErrorAction Stop
-                            & $script:WriteGuiOutput -Text "  Registry entry removed: $regKey" -Color "Gray"
-                        }
-                        else {
-                            & $script:WriteGuiOutput -Text "  Registry key not found (already removed)." -Color "Gray"
-                        }
-                    }
-                    else {
-                        Invoke-Command -ComputerName $targetComputer -ScriptBlock {
-                            param($sid)
-                            $regPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid"
-                            if (Test-Path $regPath) {
-                                Remove-Item -Path $regPath -Recurse -Force -ErrorAction Stop
-                            }
-                        } -ArgumentList $prof.SID -ErrorAction Stop
-                        & $script:WriteGuiOutput -Text "  Remote registry entry removed." -Color "Gray"
-                    }
+            
+                $selected = @($script:profileList | Where-Object { $_.Selected -eq $true })
+                & $script:WriteGuiOutput -Text "[Force Remove] Found $($selected.Count) selected profile(s)" -Color 'Gray'
+                if ($selected.Count -eq 0) {
+                    & $script:WriteGuiOutput -Text '[Force Remove] No profiles selected - aborting' -Color 'Yellow'
+                    [System.Windows.MessageBox]::Show("No profiles selected. Use the checkboxes to select profiles to remove.", "No Selection", "OK", "Information")
+                    return
                 }
-                catch {
-                    & $script:WriteGuiOutput -Text "  ERROR removing registry: $($_.Exception.Message)" -Color "Red"
-                    $success = $false
+            
+                $userList = ($selected | ForEach-Object { "$($_.UserName) ($($_.SID))" }) -join "`n"
+                $confirm = [System.Windows.MessageBox]::Show(
+                    "Are you sure you want to FORCE REMOVE the following $($selected.Count) profile(s)?`n`n$userList`n`nThis action CANNOT be undone!",
+                    "Confirm Force Removal",
+                    "YesNo",
+                    "Warning"
+                )
+            
+                if ($confirm -ne 'Yes') {
+                    & $script:WriteGuiOutput -Text '[Force Remove] User cancelled confirmation dialog' -Color 'Yellow'
+                    return
                 }
+                & $script:WriteGuiOutput -Text '[Force Remove] User confirmed - proceeding with removal' -Color 'Yellow'
+            
+                $script:guiState.Running = $true
+                $controls['btnForceRemove'].IsEnabled = $false
+                $controls['progressBar'].Visibility = "Visible"
+                $controls['progressBar'].IsIndeterminate = $true
+            
+                $targetComputer = $env:COMPUTERNAME
+                if ($controls['rbRemoteComputers'].IsChecked -and $controls['txtComputerList'].Text) {
+                    $computers = $controls['txtComputerList'].Text -split "[\r\n,]+" | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+                    if ($computers.Count -gt 0) { $targetComputer = $computers[0] }
+                }
+            
+                $isLocal = ($targetComputer -eq $env:COMPUTERNAME -or $targetComputer -eq 'localhost' -or $targetComputer -eq '.')
+                $removedCount = 0
+                $failedCount = 0
+                $totalSelected = $selected.Count
+                $currentIndex = 0
+            
+                & $script:WriteGuiOutput -Text "Starting force removal of $totalSelected profile(s) on $targetComputer (local=$isLocal)" -Color "Cyan"
+                & $script:WriteGuiOutput -Text "---" -Color "Gray"
+            
+                foreach ($prof in $selected) {
+                    $currentIndex++
+                    & $script:WriteGuiOutput -Text "[$currentIndex/$totalSelected] Removing: $($prof.UserName) | SID: $($prof.SID)" -Color "Yellow"
+                    & $script:WriteGuiOutput -Text "  Path: $($prof.ProfilePath) | Size: $($prof.SizeMB) MB | Status: $($prof.Status)" -Color "Gray"
+                    [System.Windows.Forms.Application]::DoEvents()
                 
-                # Step 3: Remove profile folder
-                & $script:WriteGuiOutput -Text "  Step 3/4: Removing profile folder..." -Color "Gray"
-                if ($prof.ProfilePath) {
+                    $success = $true
+                
+                    # Step 1: Unload registry hive if loaded
+                    & $script:WriteGuiOutput -Text "  Step 1/4: Checking registry hive..." -Color "Gray"
                     try {
-                        $folderPath = $prof.ProfilePath
-                        if (-not $isLocal) {
-                            $folderPath = "\\$targetComputer\" + ($prof.ProfilePath -replace ':', '$')
-                        }
-                        & $script:WriteGuiOutput -Text "  Target path: $folderPath" -Color "Gray"
-                        if (Test-Path $folderPath) {
-                            Remove-Item -Path $folderPath -Recurse -Force -ErrorAction Stop
-                            & $script:WriteGuiOutput -Text "  Profile folder removed successfully." -Color "Gray"
+                        if ($isLocal) {
+                            $hiveLoaded = Test-Path "Registry::HKEY_USERS\$($prof.SID)"
+                            if ($hiveLoaded) {
+                                & $script:WriteGuiOutput -Text "  Hive loaded - unloading HKU\$($prof.SID)..." -Color "Gray"
+                                $null = & reg.exe unload "HKU\$($prof.SID)" 2>&1
+                                & $script:WriteGuiOutput -Text "  Hive unloaded." -Color "Gray"
+                            }
+                            else {
+                                & $script:WriteGuiOutput -Text "  Hive not loaded, skipping." -Color "Gray"
+                            }
                         }
                         else {
-                            & $script:WriteGuiOutput -Text "  Profile folder not found (already removed or orphaned)." -Color "Gray"
+                            & $script:WriteGuiOutput -Text "  Remote target - hive unload skipped." -Color "Gray"
                         }
                     }
                     catch {
-                        & $script:WriteGuiOutput -Text "  ERROR removing folder: $($_.Exception.Message)" -Color "Red"
-                        $success = $false
+                        & $script:WriteGuiOutput -Text "  Warning: Could not unload hive: $_" -Color "Yellow"
                     }
-                }
                 
-                # Step 4: Remove local user account (so it disappears from Computer Management)
-                & $script:WriteGuiOutput -Text "  Step 4/4: Checking for local user account..." -Color "Gray"
-                try {
-                    $shortName = if ($prof.UserName) { ($prof.UserName -split '\\')[-1] } else { $null }
-                    if ($shortName -and $shortName -ne '(Unresolvable)') {
-                        & $script:WriteGuiOutput -Text "  Looking up local account: $shortName" -Color "Gray"
+                    # Step 2: Remove registry entry
+                    & $script:WriteGuiOutput -Text "  Step 2/4: Removing ProfileList registry key..." -Color "Gray"
+                    try {
                         if ($isLocal) {
-                            $localUser = $null
-                            try { $localUser = Get-LocalUser -Name $shortName -ErrorAction SilentlyContinue } catch {}
-                            if ($localUser) {
-                                Remove-LocalUser -Name $shortName -ErrorAction Stop
-                                & $script:WriteGuiOutput -Text "  Local user account '$shortName' removed." -Color "Gray"
+                            $regKey = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$($prof.SID)"
+                            if (Test-Path $regKey) {
+                                Remove-Item -Path $regKey -Recurse -Force -ErrorAction Stop
+                                & $script:WriteGuiOutput -Text "  Registry entry removed: $regKey" -Color "Gray"
                             }
                             else {
-                                & $script:WriteGuiOutput -Text "  No local account found for '$shortName' (domain account or already removed)." -Color "Gray"
+                                & $script:WriteGuiOutput -Text "  Registry key not found (already removed)." -Color "Gray"
                             }
                         }
                         else {
                             Invoke-Command -ComputerName $targetComputer -ScriptBlock {
-                                param($name)
-                                $u = $null
-                                try { $u = Get-LocalUser -Name $name -ErrorAction SilentlyContinue } catch {}
-                                if ($u) { Remove-LocalUser -Name $name -ErrorAction Stop }
-                            } -ArgumentList $shortName -ErrorAction Stop
-                            & $script:WriteGuiOutput -Text "  Remote user account '$shortName' removed." -Color "Gray"
+                                param($sid)
+                                $regPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid"
+                                if (Test-Path $regPath) {
+                                    Remove-Item -Path $regPath -Recurse -Force -ErrorAction Stop
+                                }
+                            } -ArgumentList $prof.SID -ErrorAction Stop
+                            & $script:WriteGuiOutput -Text "  Remote registry entry removed." -Color "Gray"
                         }
                     }
-                }
-                catch {
-                    & $script:WriteGuiOutput -Text "  Note: Could not remove user account: $($_.Exception.Message)" -Color "Yellow"
-                }
+                    catch {
+                        & $script:WriteGuiOutput -Text "  ERROR removing registry: $($_.Exception.Message)" -Color "Red"
+                        $success = $false
+                    }
                 
-                if ($success) {
-                    $removedCount++
-                    & $script:WriteGuiOutput -Text "  Successfully removed $($prof.UserName)." -Color "Green"
+                    # Step 3: Remove profile folder
+                    & $script:WriteGuiOutput -Text "  Step 3/4: Removing profile folder..." -Color "Gray"
+                    if ($prof.ProfilePath) {
+                        try {
+                            $folderPath = $prof.ProfilePath
+                            if (-not $isLocal) {
+                                $folderPath = "\\$targetComputer\" + ($prof.ProfilePath -replace ':', '$')
+                            }
+                            & $script:WriteGuiOutput -Text "  Target path: $folderPath" -Color "Gray"
+                            if (Test-Path $folderPath) {
+                                Remove-Item -Path $folderPath -Recurse -Force -ErrorAction Stop
+                                & $script:WriteGuiOutput -Text "  Profile folder removed successfully." -Color "Gray"
+                            }
+                            else {
+                                & $script:WriteGuiOutput -Text "  Profile folder not found (already removed or orphaned)." -Color "Gray"
+                            }
+                        }
+                        catch {
+                            & $script:WriteGuiOutput -Text "  ERROR removing folder: $($_.Exception.Message)" -Color "Red"
+                            $success = $false
+                        }
+                    }
+                
+                    # Step 4: Remove local user account (so it disappears from Computer Management)
+                    & $script:WriteGuiOutput -Text "  Step 4/4: Checking for local user account..." -Color "Gray"
+                    try {
+                        $shortName = if ($prof.UserName) { ($prof.UserName -split '\\')[-1] } else { $null }
+                        if ($shortName -and $shortName -ne '(Unresolvable)') {
+                            & $script:WriteGuiOutput -Text "  Looking up local account: $shortName" -Color "Gray"
+                            if ($isLocal) {
+                                $localUser = $null
+                                try { $localUser = Get-LocalUser -Name $shortName -ErrorAction SilentlyContinue } catch {}
+                                if ($localUser) {
+                                    Remove-LocalUser -Name $shortName -ErrorAction Stop
+                                    & $script:WriteGuiOutput -Text "  Local user account '$shortName' removed." -Color "Gray"
+                                }
+                                else {
+                                    & $script:WriteGuiOutput -Text "  No local account found for '$shortName' (domain account or already removed)." -Color "Gray"
+                                }
+                            }
+                            else {
+                                Invoke-Command -ComputerName $targetComputer -ScriptBlock {
+                                    param($name)
+                                    $u = $null
+                                    try { $u = Get-LocalUser -Name $name -ErrorAction SilentlyContinue } catch {}
+                                    if ($u) { Remove-LocalUser -Name $name -ErrorAction Stop }
+                                } -ArgumentList $shortName -ErrorAction Stop
+                                & $script:WriteGuiOutput -Text "  Remote user account '$shortName' removed." -Color "Gray"
+                            }
+                        }
+                    }
+                    catch {
+                        & $script:WriteGuiOutput -Text "  Note: Could not remove user account: $($_.Exception.Message)" -Color "Yellow"
+                    }
+                
+                    if ($success) {
+                        $removedCount++
+                        & $script:WriteGuiOutput -Text "  Successfully removed $($prof.UserName)." -Color "Green"
+                    }
+                    else {
+                        $failedCount++
+                        & $script:WriteGuiOutput -Text "  FAILED to fully remove $($prof.UserName)." -Color "Red"
+                    }
                 }
-                else {
-                    $failedCount++
-                    & $script:WriteGuiOutput -Text "  FAILED to fully remove $($prof.UserName)." -Color "Red"
-                }
-            }
             
-            & $script:WriteGuiOutput -Text "---" -Color "Gray"
-            & $script:WriteGuiOutput -Text "Force removal complete: $removedCount removed, $failedCount failed." -Color "Cyan"
+                & $script:WriteGuiOutput -Text "---" -Color "Gray"
+                & $script:WriteGuiOutput -Text "Force removal complete: $removedCount removed, $failedCount failed." -Color "Cyan"
             
-            $script:guiState.Running = $false
-            $controls['btnForceRemove'].IsEnabled = $true
-            $controls['progressBar'].Visibility = "Collapsed"
+                $script:guiState.Running = $false
+                $controls['btnForceRemove'].IsEnabled = $true
+                $controls['progressBar'].Visibility = "Collapsed"
             
-            # Refresh the profile list
-            & $script:RefreshProfileList -TargetComputer $targetComputer
+                # Refresh the profile list
+                & $script:RefreshProfileList -TargetComputer $targetComputer
             
-            [System.Windows.MessageBox]::Show("Force removal complete.`n`nRemoved: $removedCount`nFailed: $failedCount", "Complete", "OK", "Information")
-        })
+                [System.Windows.MessageBox]::Show("Force removal complete.`n`nRemoved: $removedCount`nFailed: $failedCount", "Complete", "OK", "Information")
+            })
         
         # Event Handler: Browse Buttons
         $controls['btnBrowseBackup'].Add_Click({
-            & $script:WriteGuiOutput -Text '[Button] Browse Backup Path clicked' -Color 'Cyan'
-            $folder = New-Object Windows.Forms.FolderBrowserDialog
-            $folder.Description = "Select Backup Directory"
-            if ($folder.ShowDialog() -eq "OK") {
-                $controls['txtBackupPath'].Text = $folder.SelectedPath
-                $controls['chkBackup'].IsChecked = $true
-                & $script:WriteGuiOutput -Text "[Browse] Backup path set to: $($folder.SelectedPath)" -Color 'Gray'
-            } else {
-                & $script:WriteGuiOutput -Text '[Browse] Backup path selection cancelled' -Color 'Gray'
-            }
-        })
+                & $script:WriteGuiOutput -Text '[Button] Browse Backup Path clicked' -Color 'Cyan'
+                $folder = New-Object Windows.Forms.FolderBrowserDialog
+                $folder.Description = "Select Backup Directory"
+                if ($folder.ShowDialog() -eq "OK") {
+                    $controls['txtBackupPath'].Text = $folder.SelectedPath
+                    $controls['chkBackup'].IsChecked = $true
+                    & $script:WriteGuiOutput -Text "[Browse] Backup path set to: $($folder.SelectedPath)" -Color 'Gray'
+                }
+                else {
+                    & $script:WriteGuiOutput -Text '[Browse] Backup path selection cancelled' -Color 'Gray'
+                }
+            })
         
         $controls['btnBrowseLog'].Add_Click({
-            & $script:WriteGuiOutput -Text '[Button] Browse Log Path clicked' -Color 'Cyan'
-            $save = New-Object Windows.Forms.SaveFileDialog
-            $save.Filter = "Log files (*.log)|*.log|Text files (*.txt)|*.txt|All files (*.*)|*.*"
-            $save.FileName = "DelprofPS.log"
-            if ($save.ShowDialog() -eq "OK") {
-                $controls['txtLogPath'].Text = $save.FileName
-                $controls['chkLogPath'].IsChecked = $true
-                & $script:WriteGuiOutput -Text "[Browse] Log path set to: $($save.FileName)" -Color 'Gray'
-            } else {
-                & $script:WriteGuiOutput -Text '[Browse] Log path selection cancelled' -Color 'Gray'
-            }
-        })
+                & $script:WriteGuiOutput -Text '[Button] Browse Log Path clicked' -Color 'Cyan'
+                $save = New-Object Windows.Forms.SaveFileDialog
+                $save.Filter = "Log files (*.log)|*.log|Text files (*.txt)|*.txt|All files (*.*)|*.*"
+                $save.FileName = "DelprofPS.log"
+                if ($save.ShowDialog() -eq "OK") {
+                    $controls['txtLogPath'].Text = $save.FileName
+                    $controls['chkLogPath'].IsChecked = $true
+                    & $script:WriteGuiOutput -Text "[Browse] Log path set to: $($save.FileName)" -Color 'Gray'
+                }
+                else {
+                    & $script:WriteGuiOutput -Text '[Browse] Log path selection cancelled' -Color 'Gray'
+                }
+            })
         
         $controls['btnBrowseCSV'].Add_Click({
-            & $script:WriteGuiOutput -Text '[Button] Browse CSV Path clicked' -Color 'Cyan'
-            $save = New-Object Windows.Forms.SaveFileDialog
-            $save.Filter = "CSV files (*.csv)|*.csv|All files (*.*)|*.*"
-            $save.FileName = "DelprofPS_Results.csv"
-            if ($save.ShowDialog() -eq "OK") {
-                $controls['txtOutputPath'].Text = $save.FileName
-                $controls['chkOutputCSV'].IsChecked = $true
-                & $script:WriteGuiOutput -Text "[Browse] CSV output path set to: $($save.FileName)" -Color 'Gray'
-            } else {
-                & $script:WriteGuiOutput -Text '[Browse] CSV path selection cancelled' -Color 'Gray'
-            }
-        })
+                & $script:WriteGuiOutput -Text '[Button] Browse CSV Path clicked' -Color 'Cyan'
+                $save = New-Object Windows.Forms.SaveFileDialog
+                $save.Filter = "CSV files (*.csv)|*.csv|All files (*.*)|*.*"
+                $save.FileName = "DelprofPS_Results.csv"
+                if ($save.ShowDialog() -eq "OK") {
+                    $controls['txtOutputPath'].Text = $save.FileName
+                    $controls['chkOutputCSV'].IsChecked = $true
+                    & $script:WriteGuiOutput -Text "[Browse] CSV output path set to: $($save.FileName)" -Color 'Gray'
+                }
+                else {
+                    & $script:WriteGuiOutput -Text '[Browse] CSV path selection cancelled' -Color 'Gray'
+                }
+            })
         
         $controls['btnBrowseHtml'].Add_Click({
-            & $script:WriteGuiOutput -Text '[Button] Browse HTML Report Path clicked' -Color 'Cyan'
-            $save = New-Object Windows.Forms.SaveFileDialog
-            $save.Filter = "HTML files (*.html)|*.html|All files (*.*)|*.*"
-            $save.FileName = "DelprofPS_Report.html"
-            if ($save.ShowDialog() -eq "OK") {
-                $controls['txtHtmlPath'].Text = $save.FileName
-                $controls['chkHtmlReport'].IsChecked = $true
-                & $script:WriteGuiOutput -Text "[Browse] HTML report path set to: $($save.FileName)" -Color 'Gray'
-            } else {
-                & $script:WriteGuiOutput -Text '[Browse] HTML report path selection cancelled' -Color 'Gray'
-            }
-        })
+                & $script:WriteGuiOutput -Text '[Button] Browse HTML Report Path clicked' -Color 'Cyan'
+                $save = New-Object Windows.Forms.SaveFileDialog
+                $save.Filter = "HTML files (*.html)|*.html|All files (*.*)|*.*"
+                $save.FileName = "DelprofPS_Report.html"
+                if ($save.ShowDialog() -eq "OK") {
+                    $controls['txtHtmlPath'].Text = $save.FileName
+                    $controls['chkHtmlReport'].IsChecked = $true
+                    & $script:WriteGuiOutput -Text "[Browse] HTML report path set to: $($save.FileName)" -Color 'Gray'
+                }
+                else {
+                    & $script:WriteGuiOutput -Text '[Browse] HTML report path selection cancelled' -Color 'Gray'
+                }
+            })
         
         # Event Handler: Load Config
         $controls['btnLoadConfig'].Add_Click({
-            & $script:WriteGuiOutput -Text '[Button] Load Config clicked' -Color 'Cyan'
-            $open = New-Object Windows.Forms.OpenFileDialog
-            $open.Filter = "JSON files (*.json)|*.json|All files (*.*)|*.*"
-            $open.Title = "Load DelprofPS Configuration"
-            if ($open.ShowDialog() -eq "OK") {
-                try {
-                    $config = Get-Content $open.FileName -Raw | ConvertFrom-Json
-                    & $script:ApplyConfig -config $config -source $open.FileName
+                & $script:WriteGuiOutput -Text '[Button] Load Config clicked' -Color 'Cyan'
+                $open = New-Object Windows.Forms.OpenFileDialog
+                $open.Filter = "JSON files (*.json)|*.json|All files (*.*)|*.*"
+                $open.Title = "Load DelprofPS Configuration"
+                if ($open.ShowDialog() -eq "OK") {
+                    try {
+                        $config = Get-Content $open.FileName -Raw | ConvertFrom-Json
+                        & $script:ApplyConfig -config $config -source $open.FileName
+                    }
+                    catch {
+                        & $script:WriteGuiOutput -Text "[Config] ERROR: Failed to load config: $($_.Exception.Message)" -Color 'Red'
+                        [System.Windows.MessageBox]::Show("Failed to load configuration: $($_.Exception.Message)", "Error", "OK", "Error")
+                    }
                 }
-                catch {
-                    & $script:WriteGuiOutput -Text "[Config] ERROR: Failed to load config: $($_.Exception.Message)" -Color 'Red'
-                    [System.Windows.MessageBox]::Show("Failed to load configuration: $($_.Exception.Message)", "Error", "OK", "Error")
+                else {
+                    & $script:WriteGuiOutput -Text '[Config] Load cancelled by user' -Color 'Gray'
                 }
-            } else {
-                & $script:WriteGuiOutput -Text '[Config] Load cancelled by user' -Color 'Gray'
-            }
-        })
+            })
         
         # Event Handler: Save Config
         $controls['btnSaveConfig'].Add_Click({
-            & $script:WriteGuiOutput -Text '[Button] Save Config clicked' -Color 'Cyan'
-            $save = New-Object Windows.Forms.SaveFileDialog
-            $save.Filter = "JSON files (*.json)|*.json|All files (*.*)|*.*"
-            $save.FileName = "DelprofPS.config.json"
-            if ($save.ShowDialog() -eq "OK") {
-                & $script:WriteGuiOutput -Text "[Config] Saving configuration to: $($save.FileName)" -Color 'Gray'
-                try {
-                    $config = [ordered]@{
-                        # Connection
-                        RemoteComputers = [bool]$controls['rbRemoteComputers'].IsChecked
-                        ComputerList    = $controls['txtComputerList'].Text
+                & $script:WriteGuiOutput -Text '[Button] Save Config clicked' -Color 'Cyan'
+                $save = New-Object Windows.Forms.SaveFileDialog
+                $save.Filter = "JSON files (*.json)|*.json|All files (*.*)|*.*"
+                $save.FileName = "DelprofPS.config.json"
+                if ($save.ShowDialog() -eq "OK") {
+                    & $script:WriteGuiOutput -Text "[Config] Saving configuration to: $($save.FileName)" -Color 'Gray'
+                    try {
+                        $config = [ordered]@{
+                            # Connection
+                            RemoteComputers  = [bool]$controls['rbRemoteComputers'].IsChecked
+                            ComputerList     = $controls['txtComputerList'].Text
                         
-                        # Age / Type
-                        DaysInactive    = [int]$controls['sldDaysInactive'].Value
-                        AgeMethod       = $controls['cmbAgeMethod'].SelectedIndex
-                        ProfileType     = $controls['cmbProfileType'].SelectedIndex
+                            # Age / Type
+                            DaysInactive     = [int]$controls['sldDaysInactive'].Value
+                            AgeMethod        = $controls['cmbAgeMethod'].SelectedIndex
+                            ProfileType      = $controls['cmbProfileType'].SelectedIndex
                         
-                        # Pattern filters
-                        Exclude         = @($controls['txtExclude'].Text -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-                        Include         = @($controls['txtInclude'].Text -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+                            # Pattern filters
+                            Exclude          = @($controls['txtExclude'].Text -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+                            Include          = @($controls['txtInclude'].Text -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
                         
-                        # Size filters
-                        MinSize         = $controls['txtMinSize'].Text
-                        MaxSize         = $controls['txtMaxSize'].Text
+                            # Size filters
+                            MinSize          = $controls['txtMinSize'].Text
+                            MaxSize          = $controls['txtMaxSize'].Text
                         
-                        # Operation mode
-                        DeleteMode      = [bool]$controls['rbModeDelete'].IsChecked
+                            # Operation mode
+                            DeleteMode       = [bool]$controls['rbModeDelete'].IsChecked
                         
-                        # Action checkboxes
-                        IncludeCorrupted = [bool]$controls['chkIncludeCorrupted'].IsChecked
-                        FixCorruption    = [bool]$controls['chkFixCorruption'].IsChecked
-                        ShowSpace        = [bool]$controls['chkShowSpace'].IsChecked
-                        Detailed         = [bool]$controls['chkDetailed'].IsChecked
-                        UnloadHives      = [bool]$controls['chkUnloadHives'].IsChecked
-                        IgnoreActive     = [bool]$controls['chkIgnoreActive'].IsChecked
-                        IncludeSystem    = [bool]$controls['chkIncludeSystem'].IsChecked
-                        IncludeSpecial   = [bool]$controls['chkIncludeSpecial'].IsChecked
-                        Force            = [bool]$controls['chkForce'].IsChecked
-                        Interactive      = [bool]$controls['chkInteractive'].IsChecked
-                        Quiet            = [bool]$controls['chkQuiet'].IsChecked
-                        TestMode         = [bool]$controls['chkTestMode'].IsChecked
+                            # Action checkboxes
+                            IncludeCorrupted = [bool]$controls['chkIncludeCorrupted'].IsChecked
+                            FixCorruption    = [bool]$controls['chkFixCorruption'].IsChecked
+                            ShowSpace        = [bool]$controls['chkShowSpace'].IsChecked
+                            Detailed         = [bool]$controls['chkDetailed'].IsChecked
+                            UnloadHives      = [bool]$controls['chkUnloadHives'].IsChecked
+                            IgnoreActive     = [bool]$controls['chkIgnoreActive'].IsChecked
+                            IncludeSystem    = [bool]$controls['chkIncludeSystem'].IsChecked
+                            IncludeSpecial   = [bool]$controls['chkIncludeSpecial'].IsChecked
+                            Force            = [bool]$controls['chkForce'].IsChecked
+                            Interactive      = [bool]$controls['chkInteractive'].IsChecked
+                            Quiet            = [bool]$controls['chkQuiet'].IsChecked
+                            TestMode         = [bool]$controls['chkTestMode'].IsChecked
                         
-                        # Parallel
-                        UseParallel      = [bool]$controls['chkUseParallel'].IsChecked
-                        ThrottleLimit    = [int]$controls['sldThrottle'].Value
+                            # Parallel
+                            UseParallel      = [bool]$controls['chkUseParallel'].IsChecked
+                            ThrottleLimit    = [int]$controls['sldThrottle'].Value
                         
-                        # Output paths
-                        LogPath          = if ($controls['chkLogPath'].IsChecked) { $controls['txtLogPath'].Text } else { '' }
-                        OutputPath       = if ($controls['chkOutputCSV'].IsChecked) { $controls['txtOutputPath'].Text } else { '' }
-                        HtmlReport       = if ($controls['chkHtmlReport'].IsChecked) { $controls['txtHtmlPath'].Text } else { '' }
-                        BackupPath       = if ($controls['chkBackup'].IsChecked) { $controls['txtBackupPath'].Text } else { '' }
+                            # Output paths
+                            LogPath          = if ($controls['chkLogPath'].IsChecked) { $controls['txtLogPath'].Text } else { '' }
+                            OutputPath       = if ($controls['chkOutputCSV'].IsChecked) { $controls['txtOutputPath'].Text } else { '' }
+                            HtmlReport       = if ($controls['chkHtmlReport'].IsChecked) { $controls['txtHtmlPath'].Text } else { '' }
+                            BackupPath       = if ($controls['chkBackup'].IsChecked) { $controls['txtBackupPath'].Text } else { '' }
                         
-                        # Email
-                        SmtpServer       = $controls['txtSmtpServer'].Text
-                        EmailTo          = $controls['txtEmailTo'].Text
-                        EmailFrom        = $controls['txtEmailFrom'].Text
-                    }
+                            # Email
+                            SmtpServer       = $controls['txtSmtpServer'].Text
+                            EmailTo          = $controls['txtEmailTo'].Text
+                            EmailFrom        = $controls['txtEmailFrom'].Text
+                        }
                     
-                    $config | ConvertTo-Json -Depth 3 | Out-File $save.FileName -Encoding UTF8
-                    & $script:WriteGuiOutput -Text "Configuration saved to $($save.FileName)" -Color "Green"
+                        $config | ConvertTo-Json -Depth 3 | Out-File $save.FileName -Encoding UTF8
+                        & $script:WriteGuiOutput -Text "Configuration saved to $($save.FileName)" -Color "Green"
+                    }
+                    catch {
+                        & $script:WriteGuiOutput -Text "[Config] ERROR: Failed to save config: $($_.Exception.Message)" -Color 'Red'
+                        [System.Windows.MessageBox]::Show("Failed to save configuration: $($_.Exception.Message)", "Error", "OK", "Error")
+                    }
                 }
-                catch {
-                    & $script:WriteGuiOutput -Text "[Config] ERROR: Failed to save config: $($_.Exception.Message)" -Color 'Red'
-                    [System.Windows.MessageBox]::Show("Failed to save configuration: $($_.Exception.Message)", "Error", "OK", "Error")
+                else {
+                    & $script:WriteGuiOutput -Text '[Config] Save cancelled by user' -Color 'Gray'
                 }
-            } else {
-                & $script:WriteGuiOutput -Text '[Config] Save cancelled by user' -Color 'Gray'
-            }
-        })
+            })
         
         # Event Handler: Clear Output
         $controls['btnClear'].Add_Click({
-            $controls['txtOutput'].Clear()
-            & $script:WriteGuiOutput -Text '[Button] Output cleared' -Color 'Gray'
-        })
+                $controls['txtOutput'].Clear()
+                & $script:WriteGuiOutput -Text '[Button] Output cleared' -Color 'Gray'
+            })
         
         # Event Handler: Stop
         $controls['btnStop'].Add_Click({
-            $script:guiState.StopRequested = $true
-            & $script:WriteGuiOutput -Text "Stop requested... waiting for current operation to complete..." -Color "Yellow"
-            $controls['btnStop'].IsEnabled = $false
-        })
+                $script:guiState.StopRequested = $true
+                & $script:WriteGuiOutput -Text "Stop requested... waiting for current operation to complete..." -Color "Yellow"
+                $controls['btnStop'].IsEnabled = $false
+            })
         
         # Event Handler: Run
         $controls['btnRun'].Add_Click({
-            & $script:WriteGuiOutput -Text '[Button] RUN clicked' -Color 'Cyan'
-            if ($script:guiState.Running) {
-                & $script:WriteGuiOutput -Text '[Run] Blocked - another operation is already running' -Color 'Yellow'
-                return
-            }
-            
-            $script:guiState.Running = $true
-            $script:guiState.StopRequested = $false
-            $controls['btnRun'].IsEnabled = $false
-            $controls['btnStop'].IsEnabled = $true
-            $controls['progressBar'].Visibility = "Visible"
-            $controls['progressBar'].IsIndeterminate = $true
-            
-            # Build parameter splat
-            $params = @{}
-            
-            # Computer selection
-            if ($controls['rbRemoteComputers'].IsChecked -and $controls['txtComputerList'].Text) {
-                $params['ComputerName'] = $controls['txtComputerList'].Text -split "[\r\n,]+" | ForEach-Object { $_.Trim() } | Where-Object { $_ }
-            }
-            else {
-                $params['ComputerName'] = $env:COMPUTERNAME
-            }
-            
-            # Basic parameters
-            $params['DaysInactive'] = $controls['sldDaysInactive'].Value
-            $params['AgeCalculation'] = @('NTUSER_DAT', 'ProfilePath', 'Registry', 'LastLogon', 'LastLogoff')[$controls['cmbAgeMethod'].SelectedIndex]
-            $params['ProfileType'] = @('All', 'Local', 'Roaming', 'Temporary', 'Mandatory')[$controls['cmbProfileType'].SelectedIndex]
-            
-            # Filters
-            if ($controls['txtInclude'].Text) { $params['Include'] = $controls['txtInclude'].Text -split ',' | ForEach-Object { $_.Trim() } }
-            if ($controls['txtExclude'].Text) { $params['Exclude'] = $controls['txtExclude'].Text -split ',' | ForEach-Object { $_.Trim() } }
-            if ($controls['txtMinSize'].Text -and [int]$controls['txtMinSize'].Text) { $params['MinProfileSizeMB'] = [long]$controls['txtMinSize'].Text }
-            if ($controls['txtMaxSize'].Text -and [int]$controls['txtMaxSize'].Text) { $params['MaxProfileSizeMB'] = [long]$controls['txtMaxSize'].Text }
-            
-            # Switches
-            if ($controls['chkIncludeCorrupted'].IsChecked) { $params['IncludeCorrupted'] = $true }
-            if ($controls['chkShowSpace'].IsChecked) { $params['ShowSpace'] = $true }
-            if ($controls['chkDetailed'].IsChecked) { $params['Detailed'] = $true }
-            if ($controls['chkQuiet'].IsChecked) { $params['Quiet'] = $true }
-            if ($controls['chkUnloadHives'].IsChecked) { $params['UnloadHives'] = $true }
-            if ($controls['chkForce'].IsChecked) { $params['Force'] = $true }
-            if ($controls['chkIgnoreActive'].IsChecked) { $params['IgnoreActiveSessions'] = $true }
-            if ($controls['chkIncludeSystem'].IsChecked) { $params['IncludeSystemProfiles'] = $true }
-            if ($controls['chkIncludeSpecial'].IsChecked) { $params['IncludeSpecialProfiles'] = $true }
-            if ($controls['chkFixCorruption'].IsChecked) { $params['FixCorruption'] = $true }
-            if ($controls['chkTestMode'].IsChecked) { $params['Test'] = $true }
-            if ($controls['chkUseParallel'].IsChecked) { 
-                $params['UseParallel'] = $true 
-                $params['ThrottleLimit'] = $controls['sldThrottle'].Value
-            }
-            
-            # Operation mode
-            if ($controls['rbModePreview'].IsChecked) { $params['Preview'] = $true }
-            if ($controls['rbModeDelete'].IsChecked) { $params['Delete'] = $true }
-            if ($controls['chkInteractive'].IsChecked) { $params['Interactive'] = $true }
-            
-            # Paths
-            if ($controls['chkBackup'].IsChecked -and $controls['txtBackupPath'].Text) { $params['BackupPath'] = $controls['txtBackupPath'].Text }
-            if ($controls['chkLogPath'].IsChecked -and $controls['txtLogPath'].Text) { $params['LogPath'] = $controls['txtLogPath'].Text }
-            if ($controls['chkOutputCSV'].IsChecked -and $controls['txtOutputPath'].Text) { $params['OutputPath'] = $controls['txtOutputPath'].Text }
-            if ($controls['chkHtmlReport'].IsChecked -and $controls['txtHtmlPath'].Text) { $params['HtmlReport'] = $controls['txtHtmlPath'].Text }
-            
-            # Email
-            if ($controls['txtSmtpServer'].Text) { $params['SmtpServer'] = $controls['txtSmtpServer'].Text }
-            if ($controls['txtEmailTo'].Text) { $params['EmailTo'] = $controls['txtEmailTo'].Text }
-            if ($controls['txtEmailFrom'].Text) { $params['EmailFrom'] = $controls['txtEmailFrom'].Text }
-            
-            & $script:WriteGuiOutput -Text '[Run] Building parameter set...' -Color 'Gray'
-            & $script:WriteGuiOutput -Text "[Run] Target: $($params['ComputerName'] -join ', ')" -Color 'Gray'
-            & $script:WriteGuiOutput -Text "[Run] DaysInactive=$($params['DaysInactive']), AgeMethod=$($params['AgeCalculation']), ProfileType=$($params['ProfileType'])" -Color 'Gray'
-            if ($params['Include']) { & $script:WriteGuiOutput -Text "[Run] Include filter: $($params['Include'] -join ', ')" -Color 'Gray' }
-            if ($params['Exclude']) { & $script:WriteGuiOutput -Text "[Run] Exclude filter: $($params['Exclude'] -join ', ')" -Color 'Gray' }
-            if ($params['BackupPath']) { & $script:WriteGuiOutput -Text "[Run] Backup path: $($params['BackupPath'])" -Color 'Gray' }
-            if ($params['LogPath']) { & $script:WriteGuiOutput -Text "[Run] Log path: $($params['LogPath'])" -Color 'Gray' }
-            if ($params['OutputPath']) { & $script:WriteGuiOutput -Text "[Run] CSV output: $($params['OutputPath'])" -Color 'Gray' }
-            if ($params['HtmlReport']) { & $script:WriteGuiOutput -Text "[Run] HTML report: $($params['HtmlReport'])" -Color 'Gray' }
-            $modeStr = if ($params['Delete']) { 'DELETE' } elseif ($params['Preview']) { 'PREVIEW' } else { 'LIST' }
-            & $script:WriteGuiOutput -Text "[Run] Mode: $modeStr" -Color $(if ($params['Delete']) { 'Red' } else { 'Gray' })
-            
-            # Log command to output
-            $cmdParts = @('.\DelprofPS.ps1')
-            foreach ($key in $params.Keys) {
-                $value = $params[$key]
-                if ($value -is [switch] -or $value -is [bool]) {
-                    if ($value) { $cmdParts += "-$key" }
+                & $script:WriteGuiOutput -Text '[Button] RUN clicked' -Color 'Cyan'
+                if ($script:guiState.Running) {
+                    & $script:WriteGuiOutput -Text '[Run] Blocked - another operation is already running' -Color 'Yellow'
+                    return
                 }
-                elseif ($value -is [array]) {
-                    $cmdParts += "-$key `"$($value -join ', ')`""
+            
+                $script:guiState.Running = $true
+                $script:guiState.StopRequested = $false
+                $controls['btnRun'].IsEnabled = $false
+                $controls['btnStop'].IsEnabled = $true
+                $controls['progressBar'].Visibility = "Visible"
+                $controls['progressBar'].IsIndeterminate = $true
+            
+                # Build parameter splat
+                $params = @{}
+            
+                # Computer selection
+                if ($controls['rbRemoteComputers'].IsChecked -and $controls['txtComputerList'].Text) {
+                    $params['ComputerName'] = $controls['txtComputerList'].Text -split "[\r\n,]+" | ForEach-Object { $_.Trim() } | Where-Object { $_ }
                 }
                 else {
-                    $cmdParts += "-$key `"$value`""
+                    $params['ComputerName'] = $env:COMPUTERNAME
                 }
-            }
-            & $script:WriteGuiOutput -Text '[Run] Executing command:' -Color 'Cyan'
-            & $script:WriteGuiOutput -Text ($cmdParts -join ' ') -Color 'White'
-            & $script:WriteGuiOutput -Text '[Run] Launching background runspace...' -Color 'Gray'
-            & $script:WriteGuiOutput -Text '---' -Color 'Gray'
             
-            # Run in background runspace to keep UI responsive
-            $runspace = [runspacefactory]::CreateRunspace()
-            $runspace.Open()
-            $runspace.SessionStateProxy.SetVariable('params', $params)
-            $runspace.SessionStateProxy.SetVariable('scriptDir', $script:scriptRoot)
+                # Basic parameters
+                $params['DaysInactive'] = $controls['sldDaysInactive'].Value
+                $params['AgeCalculation'] = @('NTUSER_DAT', 'ProfilePath', 'Registry', 'LastLogon', 'LastLogoff')[$controls['cmbAgeMethod'].SelectedIndex]
+                $params['ProfileType'] = @('All', 'Local', 'Roaming', 'Temporary', 'Mandatory')[$controls['cmbProfileType'].SelectedIndex]
             
-            $powershell = [powershell]::Create().AddScript({
-                try {
-                    $mainScript = Join-Path $scriptDir 'DelprofPS.ps1'
-                    & $mainScript @params
+                # Filters
+                if ($controls['txtInclude'].Text) { $params['Include'] = $controls['txtInclude'].Text -split ',' | ForEach-Object { $_.Trim() } }
+                if ($controls['txtExclude'].Text) { $params['Exclude'] = $controls['txtExclude'].Text -split ',' | ForEach-Object { $_.Trim() } }
+                if ($controls['txtMinSize'].Text -and [int]$controls['txtMinSize'].Text) { $params['MinProfileSizeMB'] = [long]$controls['txtMinSize'].Text }
+                if ($controls['txtMaxSize'].Text -and [int]$controls['txtMaxSize'].Text) { $params['MaxProfileSizeMB'] = [long]$controls['txtMaxSize'].Text }
+            
+                # Switches
+                if ($controls['chkIncludeCorrupted'].IsChecked) { $params['IncludeCorrupted'] = $true }
+                if ($controls['chkShowSpace'].IsChecked) { $params['ShowSpace'] = $true }
+                if ($controls['chkDetailed'].IsChecked) { $params['Detailed'] = $true }
+                if ($controls['chkQuiet'].IsChecked) { $params['Quiet'] = $true }
+                if ($controls['chkUnloadHives'].IsChecked) { $params['UnloadHives'] = $true }
+                if ($controls['chkForce'].IsChecked) { $params['Force'] = $true }
+                if ($controls['chkIgnoreActive'].IsChecked) { $params['IgnoreActiveSessions'] = $true }
+                if ($controls['chkIncludeSystem'].IsChecked) { $params['IncludeSystemProfiles'] = $true }
+                if ($controls['chkIncludeSpecial'].IsChecked) { $params['IncludeSpecialProfiles'] = $true }
+                if ($controls['chkFixCorruption'].IsChecked) { $params['FixCorruption'] = $true }
+                if ($controls['chkTestMode'].IsChecked) { $params['Test'] = $true }
+                if ($controls['chkUseParallel'].IsChecked) { 
+                    $params['UseParallel'] = $true 
+                    $params['ThrottleLimit'] = $controls['sldThrottle'].Value
                 }
-                catch {
-                    Write-Error "ERROR: $($_.Exception.Message)"
+            
+                # Operation mode
+                if ($controls['rbModePreview'].IsChecked) { $params['Preview'] = $true }
+                if ($controls['rbModeDelete'].IsChecked) { $params['Delete'] = $true }
+                if ($controls['chkInteractive'].IsChecked) { $params['Interactive'] = $true }
+            
+                # Paths
+                if ($controls['chkBackup'].IsChecked -and $controls['txtBackupPath'].Text) { $params['BackupPath'] = $controls['txtBackupPath'].Text }
+                if ($controls['chkLogPath'].IsChecked -and $controls['txtLogPath'].Text) { $params['LogPath'] = $controls['txtLogPath'].Text }
+                if ($controls['chkOutputCSV'].IsChecked -and $controls['txtOutputPath'].Text) { $params['OutputPath'] = $controls['txtOutputPath'].Text }
+                if ($controls['chkHtmlReport'].IsChecked -and $controls['txtHtmlPath'].Text) { $params['HtmlReport'] = $controls['txtHtmlPath'].Text }
+            
+                # Email
+                if ($controls['txtSmtpServer'].Text) { $params['SmtpServer'] = $controls['txtSmtpServer'].Text }
+                if ($controls['txtEmailTo'].Text) { $params['EmailTo'] = $controls['txtEmailTo'].Text }
+                if ($controls['txtEmailFrom'].Text) { $params['EmailFrom'] = $controls['txtEmailFrom'].Text }
+            
+                & $script:WriteGuiOutput -Text '[Run] Building parameter set...' -Color 'Gray'
+                & $script:WriteGuiOutput -Text "[Run] Target: $($params['ComputerName'] -join ', ')" -Color 'Gray'
+                & $script:WriteGuiOutput -Text "[Run] DaysInactive=$($params['DaysInactive']), AgeMethod=$($params['AgeCalculation']), ProfileType=$($params['ProfileType'])" -Color 'Gray'
+                if ($params['Include']) { & $script:WriteGuiOutput -Text "[Run] Include filter: $($params['Include'] -join ', ')" -Color 'Gray' }
+                if ($params['Exclude']) { & $script:WriteGuiOutput -Text "[Run] Exclude filter: $($params['Exclude'] -join ', ')" -Color 'Gray' }
+                if ($params['BackupPath']) { & $script:WriteGuiOutput -Text "[Run] Backup path: $($params['BackupPath'])" -Color 'Gray' }
+                if ($params['LogPath']) { & $script:WriteGuiOutput -Text "[Run] Log path: $($params['LogPath'])" -Color 'Gray' }
+                if ($params['OutputPath']) { & $script:WriteGuiOutput -Text "[Run] CSV output: $($params['OutputPath'])" -Color 'Gray' }
+                if ($params['HtmlReport']) { & $script:WriteGuiOutput -Text "[Run] HTML report: $($params['HtmlReport'])" -Color 'Gray' }
+                $modeStr = if ($params['Delete']) { 'DELETE' } elseif ($params['Preview']) { 'PREVIEW' } else { 'LIST' }
+                & $script:WriteGuiOutput -Text "[Run] Mode: $modeStr" -Color $(if ($params['Delete']) { 'Red' } else { 'Gray' })
+            
+                # Log command to output
+                $cmdParts = @('.\DelprofPS.ps1')
+                foreach ($key in $params.Keys) {
+                    $value = $params[$key]
+                    if ($value -is [switch] -or $value -is [bool]) {
+                        if ($value) { $cmdParts += "-$key" }
+                    }
+                    elseif ($value -is [array]) {
+                        $cmdParts += "-$key `"$($value -join ', ')`""
+                    }
+                    else {
+                        $cmdParts += "-$key `"$value`""
+                    }
                 }
-            })
+                & $script:WriteGuiOutput -Text '[Run] Executing command:' -Color 'Cyan'
+                & $script:WriteGuiOutput -Text ($cmdParts -join ' ') -Color 'White'
+                & $script:WriteGuiOutput -Text '[Run] Launching background runspace...' -Color 'Gray'
+                & $script:WriteGuiOutput -Text '---' -Color 'Gray'
             
-            $powershell.Runspace = $runspace
+                # Run in background runspace to keep UI responsive
+                $runspace = [runspacefactory]::CreateRunspace()
+                $runspace.Open()
+                $runspace.SessionStateProxy.SetVariable('params', $params)
+                $runspace.SessionStateProxy.SetVariable('scriptDir', $script:scriptRoot)
             
-            # Use PSDataCollection for output so we can read it incrementally
-            $outputCollection = New-Object System.Management.Automation.PSDataCollection[PSObject]
-            $asyncResult = $powershell.BeginInvoke($outputCollection, $outputCollection)
-            
-            # Mutable state hashtable — reference type persists across ticks inside .GetNewClosure()
-            $runPollState = @{ InfoIdx = 0; WarnIdx = 0; ErrIdx = 0; OutIdx = 0 }
-            
-            $controlsRef = $controls
-            $paramsRef = $params
-            $guiStateRef = $script:guiState
-            
-            # DispatcherTimer polls streams every 200ms without blocking the UI
-            $runTimer = New-Object System.Windows.Threading.DispatcherTimer
-            $script:activeRunTimer = $runTimer
-            $runTimer.Interval = [TimeSpan]::FromMilliseconds(200)
-            $runTimer.Add_Tick({
-                try {
-                    # Guard against stale timer from a previous GUI session
-                    if ($null -eq $powershell -or $null -eq $asyncResult) { $runTimer.Stop(); return }
-                    
-                    # Drain new output objects
-                    while ($runPollState.OutIdx -lt $outputCollection.Count) {
-                        $item = $outputCollection[$runPollState.OutIdx]
-                        if ($item) {
-                            $controlsRef['txtOutput'].AppendText("[$(Get-Date -Format 'HH:mm:ss')] $item`r`n")
-                            $controlsRef['txtOutput'].ScrollToEnd()
-                        }
-                        $runPollState.OutIdx++
-                    }
-                    
-                    # Drain Information stream (Write-Host output goes here in PS5.1 runspaces)
-                    while ($runPollState.InfoIdx -lt $powershell.Streams.Information.Count) {
-                        $info = $powershell.Streams.Information[$runPollState.InfoIdx]
-                        $controlsRef['txtOutput'].AppendText("[$(Get-Date -Format 'HH:mm:ss')] $($info.MessageData)`r`n")
-                        $controlsRef['txtOutput'].ScrollToEnd()
-                        $runPollState.InfoIdx++
-                    }
-                    
-                    # Drain Warning stream
-                    while ($runPollState.WarnIdx -lt $powershell.Streams.Warning.Count) {
-                        $warn = $powershell.Streams.Warning[$runPollState.WarnIdx]
-                        $controlsRef['txtOutput'].AppendText("[$(Get-Date -Format 'HH:mm:ss')] [WARNING] $($warn.Message)`r`n")
-                        $controlsRef['txtOutput'].ScrollToEnd()
-                        $runPollState.WarnIdx++
-                    }
-                    
-                    # Drain Error stream
-                    while ($runPollState.ErrIdx -lt $powershell.Streams.Error.Count) {
-                        $err = $powershell.Streams.Error[$runPollState.ErrIdx]
-                        $controlsRef['txtOutput'].AppendText("[$(Get-Date -Format 'HH:mm:ss')] [ERROR] $($err.Exception.Message)`r`n")
-                        $controlsRef['txtOutput'].ScrollToEnd()
-                        $runPollState.ErrIdx++
-                    }
-                    
-                    # Check for stop request
-                    if ($guiStateRef.StopRequested) {
-                        $powershell.Stop()
-                    }
-                    
-                    # When completed, clean up
-                    if ($asyncResult.IsCompleted) {
-                        $runTimer.Stop()
-                        $script:activeRunTimer = $null
-                        
+                $powershell = [powershell]::Create().AddScript({
                         try {
-                            $powershell.EndInvoke($asyncResult)
+                            $mainScript = Join-Path $scriptDir 'DelprofPS.ps1'
+                            & $mainScript @params
                         }
                         catch {
-                            $controlsRef['txtOutput'].AppendText("[$(Get-Date -Format 'HH:mm:ss')] Operation stopped or encountered an error.`r`n")
-                            $controlsRef['txtOutput'].ScrollToEnd()
+                            Write-Error "ERROR: $($_.Exception.Message)"
                         }
-                        finally {
-                            $powershell.Dispose()
-                            $runspace.Close()
-                            $runspace.Dispose()
+                    })
+            
+                $powershell.Runspace = $runspace
+            
+                # Use PSDataCollection for output so we can read it incrementally
+                $outputCollection = New-Object System.Management.Automation.PSDataCollection[PSObject]
+                $asyncResult = $powershell.BeginInvoke($outputCollection, $outputCollection)
+            
+                # Mutable state hashtable — reference type persists across ticks inside .GetNewClosure()
+                $runPollState = @{ InfoIdx = 0; WarnIdx = 0; ErrIdx = 0; OutIdx = 0 }
+            
+                $controlsRef = $controls
+                $paramsRef = $params
+                $guiStateRef = $script:guiState
+            
+                # DispatcherTimer polls streams every 200ms without blocking the UI
+                $runTimer = New-Object System.Windows.Threading.DispatcherTimer
+                $script:activeRunTimer = $runTimer
+                $runTimer.Interval = [TimeSpan]::FromMilliseconds(200)
+                $runTimer.Add_Tick({
+                        try {
+                            # Guard against stale timer from a previous GUI session
+                            if ($null -eq $powershell -or $null -eq $asyncResult) { $runTimer.Stop(); return }
+                    
+                            # Drain new output objects
+                            while ($runPollState.OutIdx -lt $outputCollection.Count) {
+                                $item = $outputCollection[$runPollState.OutIdx]
+                                if ($item) {
+                                    $controlsRef['txtOutput'].AppendText("[$(Get-Date -Format 'HH:mm:ss')] $item`r`n")
+                                    $controlsRef['txtOutput'].ScrollToEnd()
+                                }
+                                $runPollState.OutIdx++
+                            }
+                    
+                            # Drain Information stream (Write-Host output goes here in PS5.1 runspaces)
+                            while ($runPollState.InfoIdx -lt $powershell.Streams.Information.Count) {
+                                $info = $powershell.Streams.Information[$runPollState.InfoIdx]
+                                $controlsRef['txtOutput'].AppendText("[$(Get-Date -Format 'HH:mm:ss')] $($info.MessageData)`r`n")
+                                $controlsRef['txtOutput'].ScrollToEnd()
+                                $runPollState.InfoIdx++
+                            }
+                    
+                            # Drain Warning stream
+                            while ($runPollState.WarnIdx -lt $powershell.Streams.Warning.Count) {
+                                $warn = $powershell.Streams.Warning[$runPollState.WarnIdx]
+                                $controlsRef['txtOutput'].AppendText("[$(Get-Date -Format 'HH:mm:ss')] [WARNING] $($warn.Message)`r`n")
+                                $controlsRef['txtOutput'].ScrollToEnd()
+                                $runPollState.WarnIdx++
+                            }
+                    
+                            # Drain Error stream
+                            while ($runPollState.ErrIdx -lt $powershell.Streams.Error.Count) {
+                                $err = $powershell.Streams.Error[$runPollState.ErrIdx]
+                                $controlsRef['txtOutput'].AppendText("[$(Get-Date -Format 'HH:mm:ss')] [ERROR] $($err.Exception.Message)`r`n")
+                                $controlsRef['txtOutput'].ScrollToEnd()
+                                $runPollState.ErrIdx++
+                            }
+                    
+                            # Check for stop request
+                            if ($guiStateRef.StopRequested) {
+                                $powershell.Stop()
+                            }
+                    
+                            # When completed, clean up
+                            if ($asyncResult.IsCompleted) {
+                                $runTimer.Stop()
+                                $script:activeRunTimer = $null
+                        
+                                try {
+                                    $powershell.EndInvoke($asyncResult)
+                                }
+                                catch {
+                                    $controlsRef['txtOutput'].AppendText("[$(Get-Date -Format 'HH:mm:ss')] Operation stopped or encountered an error.`r`n")
+                                    $controlsRef['txtOutput'].ScrollToEnd()
+                                }
+                                finally {
+                                    $powershell.Dispose()
+                                    $runspace.Close()
+                                    $runspace.Dispose()
+                                }
+                        
+                                $guiStateRef.Running = $false
+                                $controlsRef['btnRun'].IsEnabled = $true
+                                $controlsRef['btnStop'].IsEnabled = $false
+                                $controlsRef['progressBar'].Visibility = "Collapsed"
+                        
+                                $controlsRef['txtOutput'].AppendText("[$(Get-Date -Format 'HH:mm:ss')] ---`r`n")
+                                $controlsRef['txtOutput'].AppendText("[$(Get-Date -Format 'HH:mm:ss')] Operation completed.`r`n")
+                                $controlsRef['txtOutput'].ScrollToEnd()
+                        
+                                if (-not $paramsRef['Quiet']) {
+                                    [System.Windows.MessageBox]::Show("Profile management operation completed!", "Complete", "OK", "Information")
+                                }
+                            }
                         }
-                        
-                        $guiStateRef.Running = $false
-                        $controlsRef['btnRun'].IsEnabled = $true
-                        $controlsRef['btnStop'].IsEnabled = $false
-                        $controlsRef['progressBar'].Visibility = "Collapsed"
-                        
-                        $controlsRef['txtOutput'].AppendText("[$(Get-Date -Format 'HH:mm:ss')] ---`r`n")
-                        $controlsRef['txtOutput'].AppendText("[$(Get-Date -Format 'HH:mm:ss')] Operation completed.`r`n")
-                        $controlsRef['txtOutput'].ScrollToEnd()
-                        
-                        if (-not $paramsRef['Quiet']) {
-                            [System.Windows.MessageBox]::Show("Profile management operation completed!", "Complete", "OK", "Information")
+                        catch {
+                            # Log the error visibly, then clean up
+                            try {
+                                $controlsRef['txtOutput'].AppendText("[$(Get-Date -Format 'HH:mm:ss')] [Timer Error] $($_.Exception.Message)`r`n")
+                                $controlsRef['txtOutput'].ScrollToEnd()
+                            }
+                            catch {}
+                            try { $runTimer.Stop() } catch {}
+                            $script:activeRunTimer = $null
+                            $guiStateRef.Running = $false
+                            $controlsRef['btnRun'].IsEnabled = $true
+                            $controlsRef['btnStop'].IsEnabled = $false
+                            $controlsRef['progressBar'].Visibility = "Collapsed"
                         }
-                    }
-                }
-                catch {
-                    # Log the error visibly, then clean up
-                    try {
-                        $controlsRef['txtOutput'].AppendText("[$(Get-Date -Format 'HH:mm:ss')] [Timer Error] $($_.Exception.Message)`r`n")
-                        $controlsRef['txtOutput'].ScrollToEnd()
-                    } catch {}
-                    try { $runTimer.Stop() } catch {}
-                    $script:activeRunTimer = $null
-                    $guiStateRef.Running = $false
-                    $controlsRef['btnRun'].IsEnabled = $true
-                    $controlsRef['btnStop'].IsEnabled = $false
-                    $controlsRef['progressBar'].Visibility = "Collapsed"
-                }
-            }.GetNewClosure())
-            $runTimer.Start()
-        })
+                    }.GetNewClosure())
+                $runTimer.Start()
+            })
         
         # Clean up timers when window closes (prevents stale timers on re-run)
         $window.Add_Closed({
-            & $script:WriteGuiOutput -Text '[Window] GUI window closing - cleaning up timers...' -Color 'Gray'
-            if ($script:activeRefreshTimer) {
-                try { $script:activeRefreshTimer.Stop() } catch {}
-                $script:activeRefreshTimer = $null
-            }
-            if ($script:activeRunTimer) {
-                try { $script:activeRunTimer.Stop() } catch {}
-                $script:activeRunTimer = $null
-            }
-        })
+                & $script:WriteGuiOutput -Text '[Window] GUI window closing - cleaning up timers...' -Color 'Gray'
+                if ($script:activeRefreshTimer) {
+                    try { $script:activeRefreshTimer.Stop() } catch {}
+                    $script:activeRefreshTimer = $null
+                }
+                if ($script:activeRunTimer) {
+                    try { $script:activeRunTimer.Stop() } catch {}
+                    $script:activeRunTimer = $null
+                }
+            })
         
         # Show Window
         $window.ShowDialog() | Out-Null
@@ -1761,7 +1814,8 @@ begin {
     if ($Credential -ne [System.Management.Automation.PSCredential]::Empty) {
         $script:CredentialSplat = @{ Credential = $Credential }
         Write-Host "[INIT] Using explicit credential for $($Credential.UserName)" -ForegroundColor Gray
-    } else {
+    }
+    else {
         Write-Host "[INIT] Using current identity for authentication" -ForegroundColor Gray
     }
 
@@ -1862,8 +1916,8 @@ begin {
 
             # Reject unexpected/dangerous keys
             $allowedKeys = @('DaysInactive', 'Exclude', 'Include', 'MaxRetries', 'LogPath', 'OutputPath',
-                             'HtmlReport', 'BackupPath', 'SmtpServer', 'EmailTo', 'EmailFrom',
-                             'AgeCalculation', 'ProfileType', 'RetryDelaySeconds')
+                'HtmlReport', 'BackupPath', 'SmtpServer', 'EmailTo', 'EmailFrom',
+                'AgeCalculation', 'ProfileType', 'RetryDelaySeconds')
             $configKeys = $config.PSObject.Properties.Name
             foreach ($key in $configKeys) {
                 if ($key -notin $allowedKeys) {
@@ -1897,7 +1951,7 @@ begin {
     #region Path Validation
     # Validate output paths early to fail fast before processing
     $pathsToValidate = @{
-        LogPath = $LogPath
+        LogPath    = $LogPath
         OutputPath = $OutputPath
         HtmlReport = $HtmlReport
         BackupPath = $BackupPath
@@ -2012,7 +2066,8 @@ begin {
                 # Pattern match for domain admin
                 $pattern = $protectedSid -replace '%', '\d+'
                 if ($SID -match $pattern) { return $true }
-            } else {
+            }
+            else {
                 if ($SID -eq $protectedSid) { return $true }
             }
         }
@@ -2325,13 +2380,13 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
             $status = if ($result.Deleted) { 'Deleted' } elseif ($result.IsActiveSession) { 'Active' } elseif ($result.Error) { 'Error' } else { 'Kept' }
             
             $html += "                <tr class='$rowClass'>" +
-                "<td>$($result.ComputerName)</td>" +
-                "<td>$($result.UserName)</td>" +
-                "<td><span class='badge $typeClass'>$($result.ProfileType)</span></td>" +
-                "<td>$($result.LastUsed)</td>" +
-                "<td>$($result.AgeInDays)</td>" +
-                "<td>$($result.SizeFormatted)</td>" +
-                "<td>$status</td></tr>`n"
+            "<td>$($result.ComputerName)</td>" +
+            "<td>$($result.UserName)</td>" +
+            "<td><span class='badge $typeClass'>$($result.ProfileType)</span></td>" +
+            "<td>$($result.LastUsed)</td>" +
+            "<td>$($result.AgeInDays)</td>" +
+            "<td>$($result.SizeFormatted)</td>" +
+            "<td>$status</td></tr>`n"
         }
         
         $html += @"
@@ -2397,7 +2452,8 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
                 'Spacebar' {
                     if ($selected -contains $currentIndex) {
                         $selected.Remove($currentIndex)
-                    } else {
+                    }
+                    else {
                         $selected.Add($currentIndex)
                     }
                 }
@@ -2504,16 +2560,16 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
             Write-DPLog -Message "  [Sessions] Method 2: WMI Win32_LogonSession (Interactive/RemoteInteractive)" -Level 'DEBUG'
             try {
                 $logonSessions = Get-WmiObject -Class Win32_LogonSession -ComputerName $ComputerName -ErrorAction SilentlyContinue @script:CredentialSplat |
-                    Where-Object { $_.LogonType -eq 2 -or $_.LogonType -eq 10 -or $_.LogonType -eq 11 }  # 2=Interactive, 10=RemoteInteractive, 11=CachedInteractive
+                Where-Object { $_.LogonType -eq 2 -or $_.LogonType -eq 10 -or $_.LogonType -eq 11 }  # 2=Interactive, 10=RemoteInteractive, 11=CachedInteractive
                 if ($logonSessions) {
                     $wmiSessions = @()
                     foreach ($ls in $logonSessions) {
                         $related = Get-WmiObject -Class Win32_LoggedOnUser -ComputerName $ComputerName -ErrorAction SilentlyContinue @script:CredentialSplat |
-                            Where-Object { $_.Dependent -like "*LogonId=`"$($ls.LogonId)`"*" } |
-                            ForEach-Object {
-                                $_.Antecedent -match 'Domain="([^"]+)",Name="([^"]+)"' | Out-Null
-                                "$($matches[1])\$($matches[2])"
-                            }
+                        Where-Object { $_.Dependent -like "*LogonId=`"$($ls.LogonId)`"*" } |
+                        ForEach-Object {
+                            $_.Antecedent -match 'Domain="([^"]+)",Name="([^"]+)"' | Out-Null
+                            "$($matches[1])\$($matches[2])"
+                        }
                         $wmiSessions += $related
                     }
                     $wmiSessions = $wmiSessions | Select-Object -Unique
@@ -2532,10 +2588,10 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
             Write-DPLog -Message "  [Sessions] Method 3: explorer.exe process owners" -Level 'DEBUG'
             try {
                 $explorerUsers = Get-WmiObject -Class Win32_Process -ComputerName $ComputerName -Filter "Name='explorer.exe'" -ErrorAction SilentlyContinue |
-                    ForEach-Object { 
-                        $owner = $_.GetOwner()
-                        if ($owner) { "$($owner.Domain)\$($owner.User)" }
-                    } | Select-Object -Unique
+                ForEach-Object { 
+                    $owner = $_.GetOwner()
+                    if ($owner) { "$($owner.Domain)\$($owner.User)" }
+                } | Select-Object -Unique
                 $sessions += $explorerUsers
                 Write-DPLog -Message "  [Sessions] Explorer.exe found $(@($explorerUsers).Count) user(s)" -Level 'DEBUG'
             }
@@ -2787,7 +2843,8 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
         
         # Execute chosen action
         switch ($choice) {
-            'R' { # Remove registry key or Recreate NTUSER.DAT
+            'R' {
+                # Remove registry key or Recreate NTUSER.DAT
                 if ($CorruptionType -eq 'Corrupted (Path Missing)') {
                     # Remove orphaned registry key
                     $targetDesc = "Remove orphaned registry key for $UserName ($SID)"
@@ -2853,7 +2910,8 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
                 }
             }
             
-            'D' { # Delete entire profile
+            'D' {
+                # Delete entire profile
                 $targetDesc = "Delete entire corrupted profile for $UserName ($SID) at $ProfilePath"
                 if ($PSCmdlet.ShouldProcess($targetDesc, 'Delete Corrupted Profile')) {
                     try {
@@ -2891,7 +2949,8 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
                 }
             }
             
-            'F' { # Force-remove folder only
+            'F' {
+                # Force-remove folder only
                 $targetDesc = "Remove profile folder for $UserName at $ProfilePath"
                 if ($PSCmdlet.ShouldProcess($targetDesc, 'Remove Folder')) {
                     try {
@@ -2899,7 +2958,7 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
                             if (Test-Path $ProfilePath) {
                                 # Remove read-only attributes
                                 Get-ChildItem -Path $ProfilePath -Recurse -Force -ErrorAction SilentlyContinue | 
-                                    ForEach-Object { $_.Attributes = $_.Attributes -band -bnot [System.IO.FileAttributes]::ReadOnly }
+                                ForEach-Object { $_.Attributes = $_.Attributes -band -bnot [System.IO.FileAttributes]::ReadOnly }
                                 Remove-Item -Path $ProfilePath -Recurse -Force
                             }
                         }
@@ -2908,7 +2967,7 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
                                 param($profilePath)
                                 if (Test-Path $profilePath) {
                                     Get-ChildItem -Path $profilePath -Recurse -Force -ErrorAction SilentlyContinue | 
-                                        ForEach-Object { $_.Attributes = $_.Attributes -band -bnot [System.IO.FileAttributes]::ReadOnly }
+                                    ForEach-Object { $_.Attributes = $_.Attributes -band -bnot [System.IO.FileAttributes]::ReadOnly }
                                     Remove-Item -Path $profilePath -Recurse -Force
                                 }
                             }
@@ -2925,7 +2984,8 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
                 }
             }
             
-            'S' { # Skip
+            'S' {
+                # Skip
                 $actionTaken = 'Skipped by administrator'
                 if (-not $Quiet) {
                     Write-Host "  Skipped corruption repair for $UserName" -ForegroundColor Yellow
@@ -2937,9 +2997,9 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
         Write-EventLogEntry -Message "Corruption repair on $ComputerName for '$UserName' ($SID): Choice=$choice, Action=$actionTaken, Fixed=$fixed" -EntryType Information -EventId 1012
         
         return [PSCustomObject]@{
-            Fixed = $fixed
+            Fixed       = $fixed
             ActionTaken = $actionTaken
-            Choice = $choice
+            Choice      = $choice
         }
     }
     #endregion
@@ -2960,9 +3020,9 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
                 Write-DPLog -Message "  [Registry] Using WMI for remote registry access on $ComputerName" -Level 'DEBUG'
                 # Use WMI for remote registry
                 $profileKeys = Get-WmiObject -ComputerName $ComputerName -Class StdRegProv -Namespace 'root\default' -ErrorAction Stop @script:CredentialSplat |
-                    ForEach-Object { $_.EnumKey(2147483650, 'SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList') } |
-                    Select-Object -ExpandProperty sNames |
-                    Where-Object { $_ -match '^S-1-5-21' }
+                ForEach-Object { $_.EnumKey(2147483650, 'SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList') } |
+                Select-Object -ExpandProperty sNames |
+                Where-Object { $_ -match '^S-1-5-21' }
                 
                 # Cache WMI connection outside loop to avoid reconnecting per-SID
                 $regProv = Get-WmiObject -ComputerName $ComputerName -Class StdRegProv -Namespace 'root\default' -ErrorAction Stop @script:CredentialSplat
@@ -2981,10 +3041,10 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
                         
                         Write-DPLog -Message "    [Registry] $sid -> $profilePath" -Level 'DEBUG'
                         $profiles += @{
-                            SID = $sid
-                            ProfilePath = $profilePath
+                            SID               = $sid
+                            ProfilePath       = $profilePath
                             RoamingConfigured = $roamingValue.uValue
-                            TemporaryProfile = $tempValue.uValue
+                            TemporaryProfile  = $tempValue.uValue
                         }
                     }
                     catch {
@@ -2996,7 +3056,7 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
                 Write-DPLog -Message "  [Registry] Using local registry access" -Level 'DEBUG'
                 # Local registry access
                 $profileKeys = Get-ChildItem $profileListPath -ErrorAction Stop | 
-                    Where-Object { $_.PSChildName -match '^S-1-5-21' }
+                Where-Object { $_.PSChildName -match '^S-1-5-21' }
                 
                 Write-DPLog -Message "  [Registry] Found $(@($profileKeys).Count) profile SIDs locally" -Level 'DEBUG'
                 foreach ($key in $profileKeys) {
@@ -3004,10 +3064,10 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
                         $props = Get-ItemProperty $key.PSPath
                         Write-DPLog -Message "    [Registry] $($key.PSChildName) -> $($props.ProfileImagePath)" -Level 'DEBUG'
                         $profiles += @{
-                            SID = $key.PSChildName
-                            ProfilePath = $props.ProfileImagePath
+                            SID               = $key.PSChildName
+                            ProfilePath       = $props.ProfileImagePath
                             RoamingConfigured = $props.RoamingConfigured
-                            TemporaryProfile = $props.TemporaryProfile
+                            TemporaryProfile  = $props.TemporaryProfile
                         }
                     }
                     catch {
@@ -3088,7 +3148,7 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
         try {
             # Find loaded hives
             $loadedHives = Get-ChildItem 'HKU:' -ErrorAction SilentlyContinue | 
-                Where-Object { $_.Name -match '^HKEY_USERS\\S-1-5-21' }
+            Where-Object { $_.Name -match '^HKEY_USERS\\S-1-5-21' }
             Write-DPLog -Message "    [Hive] Found $(@($loadedHives).Count) user hives currently loaded" -Level 'DEBUG'
             
             foreach ($hive in $loadedHives) {
@@ -3139,7 +3199,7 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
                 # Remove read-only attributes
                 Write-DPLog -Message "    [Delete] Clearing read-only attributes..." -Level 'DEBUG'
                 Get-ChildItem -Path $ProfilePath -Recurse -Force -ErrorAction SilentlyContinue | 
-                    ForEach-Object { $_.Attributes = $_.Attributes -band -bnot [System.IO.FileAttributes]::ReadOnly }
+                ForEach-Object { $_.Attributes = $_.Attributes -band -bnot [System.IO.FileAttributes]::ReadOnly }
                 
                 # Remove the directory
                 if ($ComputerName -eq $env:COMPUTERNAME -or $ComputerName -eq 'localhost' -or $ComputerName -eq '.') {
@@ -3152,7 +3212,7 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
                     $scriptBlock = {
                         param($Path)
                         Get-ChildItem -Path $Path -Recurse -Force -ErrorAction SilentlyContinue | 
-                            ForEach-Object { $_.Attributes = $_.Attributes -band -bnot [System.IO.FileAttributes]::ReadOnly }
+                        ForEach-Object { $_.Attributes = $_.Attributes -band -bnot [System.IO.FileAttributes]::ReadOnly }
                         Remove-Item -Path $Path -Recurse -Force -ErrorAction Stop
                     }
                     Invoke-Command -ComputerName $ComputerName -ScriptBlock $scriptBlock -ArgumentList $ProfilePath -ErrorAction Stop @script:CredentialSplat
@@ -3329,13 +3389,13 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
                     $script:RepairResults = [System.Collections.Generic.List[object]]::new()
                 }
                 $script:RepairResults.Add([PSCustomObject]@{
-                    ComputerName = $ComputerName
-                    UserName = $userName
-                    SID = $sid
-                    CorruptionType = $profType
-                    Fixed = $repairResult.Fixed
-                    ActionTaken = $repairResult.ActionTaken
-                })
+                        ComputerName   = $ComputerName
+                        UserName       = $userName
+                        SID            = $sid
+                        CorruptionType = $profType
+                        Fixed          = $repairResult.Fixed
+                        ActionTaken    = $repairResult.ActionTaken
+                    })
                 
                 # If corruption was fixed by recreating NTUSER.DAT, continue processing normally
                 if ($repairResult.Fixed -and $repairResult.Choice -eq 'R') {
@@ -3375,7 +3435,8 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
             Write-DPLog -Message "  [Profile] Calculating size: $needsSize" -Level 'DEBUG'
             $sizeBytes = if ($needsSize) {
                 Get-ProfileFolderSize -Path $profilePath
-            } else { 0 }
+            }
+            else { 0 }
             $sizeFormatted = Format-Byte -Bytes $sizeBytes
             if ($needsSize) {
                 Write-DPLog -Message "  [Profile] Size: $sizeFormatted ($sizeBytes bytes)" -Level 'DEBUG'
@@ -3412,21 +3473,21 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
             
             # Build result object
             $result = [PSCustomObject]@{
-                ComputerName = $ComputerName
-                UserName = $userName.Split('\')[-1]
-                Domain = if ($userName -contains '\') { $userName.Split('\')[0] } else { $env:USERDOMAIN }
-                SID = $sid
-                ProfilePath = $profilePath
-                ProfileType = $profType
-                LastUsed = if ($lastUsed -eq [DateTime]::MinValue) { 'Unknown' } else { $lastUsed.ToString('yyyy-MM-dd HH:mm:ss') }
-                AgeInDays = $ageInDays
-                AgeSource = $ageSource
-                SizeBytes = $sizeBytes
-                SizeFormatted = $sizeFormatted
-                IsActiveSession = $hasActiveSession
+                ComputerName        = $ComputerName
+                UserName            = $userName.Split('\')[-1]
+                Domain              = if ($userName -contains '\') { $userName.Split('\')[0] } else { $env:USERDOMAIN }
+                SID                 = $sid
+                ProfilePath         = $profilePath
+                ProfileType         = $profType
+                LastUsed            = if ($lastUsed -eq [DateTime]::MinValue) { 'Unknown' } else { $lastUsed.ToString('yyyy-MM-dd HH:mm:ss') }
+                AgeInDays           = $ageInDays
+                AgeSource           = $ageSource
+                SizeBytes           = $sizeBytes
+                SizeFormatted       = $sizeFormatted
+                IsActiveSession     = $hasActiveSession
                 EligibleForDeletion = $true
-                Deleted = $false
-                Error = $null
+                Deleted             = $false
+                Error               = $null
             }
             
             # Display info
@@ -3440,7 +3501,7 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
                 if ($Detailed) {
                     $breakdown = Get-ProfileSizeBreakdown -ProfilePath $profilePath
                     $breakdownStr = $breakdown.GetEnumerator() | Where-Object { $_.Value -ne 'N/A' } | 
-                        ForEach-Object { "$($_.Key): $($_.Value)" } | Join-String -Separator ', '
+                    ForEach-Object { "$($_.Key): $($_.Value)" } | Join-String -Separator ', '
                     if ($breakdownStr) {
                         Write-Host "    Folders: $breakdownStr" -ForegroundColor Gray
                     }
@@ -3593,16 +3654,6 @@ Report generated on: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
         Write-Host "=                        PREVIEW/SIMULATION MODE                         =" -ForegroundColor Magenta
         Write-Host "=          No profiles will be deleted - showing what WOULD happen       =" -ForegroundColor Magenta
         Write-Host "====================================================================================================================================================" -ForegroundColor Magenta
-    }
-    
-    # Validate admin rights for local execution
-    Write-DPLog -Message '[Init] Checking administrator privileges...' -Level 'DEBUG'
-    if ($ComputerName -contains $env:COMPUTERNAME -or $ComputerName -contains 'localhost' -or $ComputerName -contains '.') {
-        if (-not (Test-AdminRight)) {
-            Write-DPLog -Message "Administrator privileges required for local execution. Restart as admin." -Level 'ERROR'
-            Write-EventLogEntry -Message "Failed to start - admin rights required" -EntryType Error -EventId 1005
-            exit 1
-        }
     }
     
     # Validate delete warnings
@@ -3770,11 +3821,11 @@ process {
             # Re-invoke the script for a single computer in list mode (no -Delete)
             # to collect profile data; deletion happens in the main thread below.
             $splatParams = @{
-                ComputerName = $Computer
-                DaysInactive = $Params.DaysInactive
+                ComputerName   = $Computer
+                DaysInactive   = $Params.DaysInactive
                 AgeCalculation = $Params.AgeCalculation
-                ProfileType = $Params.ProfileType
-                Quiet = $true
+                ProfileType    = $Params.ProfileType
+                Quiet          = $true
             }
             if ($Params.Include) { $splatParams['Include'] = $Params.Include }
             if ($Params.Exclude) { $splatParams['Exclude'] = $Params.Exclude }
@@ -3791,20 +3842,20 @@ process {
         }
 
         $parallelParams = @{
-            DaysInactive = $DaysInactive
-            AgeCalculation = $AgeCalculation
-            ProfileType = $ProfileType
-            Include = $Include
-            Exclude = $Exclude
-            ShowSpace = [bool]$ShowSpace
-            LogPath = $LogPath
-            UnloadHives = [bool]$UnloadHives
-            IncludeCorrupted = [bool]$IncludeCorrupted
-            IncludeSystemProfiles = [bool]$IncludeSystemProfiles
+            DaysInactive           = $DaysInactive
+            AgeCalculation         = $AgeCalculation
+            ProfileType            = $ProfileType
+            Include                = $Include
+            Exclude                = $Exclude
+            ShowSpace              = [bool]$ShowSpace
+            LogPath                = $LogPath
+            UnloadHives            = [bool]$UnloadHives
+            IncludeCorrupted       = [bool]$IncludeCorrupted
+            IncludeSystemProfiles  = [bool]$IncludeSystemProfiles
             IncludeSpecialProfiles = [bool]$IncludeSpecialProfiles
-            MinProfileSizeMB = $MinProfileSizeMB
-            MaxProfileSizeMB = $MaxProfileSizeMB
-            Detailed = [bool]$Detailed
+            MinProfileSizeMB       = $MinProfileSizeMB
+            MaxProfileSizeMB       = $MaxProfileSizeMB
+            Detailed               = [bool]$Detailed
         }
 
         foreach ($computer in $ComputerName) {
@@ -3832,7 +3883,8 @@ process {
                             $script:TotalSpaceFreed += $r.SizeBytes
                         }
                     }
-                } else {
+                }
+                else {
                     Write-DPLog -Message "[Parallel] Job $jobIndex returned no results" -Level 'DEBUG'
                 }
             }
@@ -3880,11 +3932,11 @@ end {
     if ($HtmlReport -and $script:Results.Count -gt 0) {
         Write-DPLog -Message "[End] Generating HTML report: $HtmlReport" -Level 'INFO'
         $summary = @{
-            Computers = $ComputerName.Count
+            Computers         = $ComputerName.Count
             ProfilesProcessed = $script:TotalProfilesProcessed
-            ProfilesDeleted = $script:TotalProfilesDeleted
-            SpaceFreed = Format-Byte -Bytes $script:TotalSpaceFreed
-            Duration = ((Get-Date) - $script:StartTime).ToString('hh\:mm\:ss')
+            ProfilesDeleted   = $script:TotalProfilesDeleted
+            SpaceFreed        = Format-Byte -Bytes $script:TotalSpaceFreed
+            Duration          = ((Get-Date) - $script:StartTime).ToString('hh\:mm\:ss')
         }
         Export-HtmlReport -Path $HtmlReport -Results $script:Results -Summary $summary
     }
@@ -3893,11 +3945,11 @@ end {
     if ($SmtpServer -and $EmailTo) {
         Write-DPLog -Message "[End] Sending email notification to $EmailTo via $SmtpServer" -Level 'INFO'
         $summary = @{
-            Computers = $ComputerName.Count
+            Computers         = $ComputerName.Count
             ProfilesProcessed = $script:TotalProfilesProcessed
-            ProfilesDeleted = $script:TotalProfilesDeleted
-            SpaceFreed = Format-Byte -Bytes $script:TotalSpaceFreed
-            Duration = ((Get-Date) - $script:StartTime).ToString('hh\:mm\:ss')
+            ProfilesDeleted   = $script:TotalProfilesDeleted
+            SpaceFreed        = Format-Byte -Bytes $script:TotalSpaceFreed
+            Duration          = ((Get-Date) - $script:StartTime).ToString('hh\:mm\:ss')
         }
         Send-NotificationEmail -Summary $summary
     }
